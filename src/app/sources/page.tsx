@@ -23,7 +23,10 @@ function LayerBadge({ source }: { source: Source }) {
 
 function SourceCard({ source }: { source: Source }) {
   return (
-    <li className="rounded-xl border border-neutral-200 bg-white p-4 sm:p-5">
+    // The id is what the map's per-layer citation links to. scroll-mt keeps
+    // the card's own heading clear of the viewport edge on arrival, so a
+    // reader following a citation lands on the title rather than mid-card.
+    <li id={source.id} className="scroll-mt-6 rounded-xl border border-neutral-200 bg-white p-4 sm:p-5 target:ring-2 target:ring-neutral-900/15">
       <div className="flex flex-wrap items-center gap-2">
         <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-600">
           {source.format}

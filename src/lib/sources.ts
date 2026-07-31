@@ -18,18 +18,24 @@ export type SourceFormat =
   | "Report (PDF)"
   | "Peer-reviewed study"
   | "Statute"
+  | "City ordinance"
   | "Investigative journalism"
   | "Government page";
 
-export type SourceCategory = "feeds" | "maps" | "law" | "research" | "fiscal" | "journalism";
+export type SourceCategory = "feeds" | "rules" | "maps" | "law" | "research" | "fiscal" | "journalism";
 
-export const CATEGORY_ORDER: SourceCategory[] = ["feeds", "maps", "journalism", "research", "fiscal", "law"];
+export const CATEGORY_ORDER: SourceCategory[] = ["feeds", "rules", "maps", "journalism", "research", "fiscal", "law"];
 
 export const CATEGORY_META: Record<SourceCategory, { title: string; blurb: string }> = {
   feeds: {
     title: "Data this map pulls from directly",
     blurb:
       "Public ArcGIS feature services re-fetched by the scripts in this repository. Every dot and polygon on the map comes from one of these — nothing on it is hand-entered, estimated, or modeled.",
+  },
+  rules: {
+    title: "The rules that put a building on the map",
+    blurb:
+      "A dot on the vacant layer is not a judgment this project made — it is a building whose owner was required by ordinance to register it as empty. These are the ordinances and city program pages that set that requirement, so a reader can check what the dot actually means.",
   },
   maps: {
     title: "Maps and portals worth opening yourself",
@@ -69,6 +75,12 @@ export interface Source {
   description: string;
   /** Which map layer, if any, is built from this source. */
   layer?: LayerKind;
+  /**
+   * Two or three words for the citation line the map shows under each
+   * layer. The full title is too long for a 20rem panel, and a citation a
+   * reader can't fit on screen is a citation they don't read.
+   */
+  short?: string;
   /** Known gaps, staleness, or caveats — from the publisher where they state one. */
   caveat?: string;
 }
@@ -84,8 +96,11 @@ export const SOURCES: Source[] = [
     category: "feeds",
     format: "Live feature service",
     layer: "vacant",
+    short: "Saint Paul register",
     description:
-      "Every building on Saint Paul's vacant-building register, as an addressed point with the date it was registered, the dwelling type, the council ward and planning district, and the city's vacancy category. The categories escalate: Category I is registration, fees, restored utilities and a Truth-in-Sale-of-Housing report; Category II blocks sale until code orders are met; Category III is condemned. 384 buildings at last fetch.",
+      "Every building on Saint Paul's vacant-building register, as an addressed point with the date it was registered, the dwelling type, the council ward and planning district, and the city's vacancy category. 384 buildings at last fetch, and the city records what each one is: 204 single-family homes, 74 duplexes, 19 multi-family buildings, 73 commercial buildings, and 14 mixed-use. The categories escalate: Category I is registration, fees, restored utilities and a Truth-in-Sale-of-Housing report; Category II blocks sale without city approval until a code compliance report and repair plan are filed; Category III requires a Certificate of Code Compliance or Occupancy before any sale.",
+    caveat:
+      "The register records that a building met one of the conditions in the ordinance — unsecured, dangerous, condemned, multiple code violations, or a year unoccupied under a nuisance order — but not which one, and never a reason the building emptied out in the first place.",
   },
   {
     id: "mpls-vbr",
@@ -96,10 +111,11 @@ export const SOURCES: Source[] = [
     category: "feeds",
     format: "Live feature service",
     layer: "vacant",
+    short: "Minneapolis register",
     description:
       "Geocoded snapshot of Minneapolis' vacant building registrations, with the registration date, ward, neighborhood, parcel ID, and registered owner. 311 buildings at last fetch. This map names owners that are companies, banks, trusts, or public bodies, and withholds the names of private individuals — the underlying record stays public at the source.",
     caveat:
-      "Minneapolis publishes several overlapping vacant-building layers. The older 'VBR' and 'VBR and Vacant CPED Properties' services are 2016-vintage and are not used here.",
+      "Minneapolis publishes several overlapping vacant-building layers. The older 'VBR' and 'VBR and Vacant CPED Properties' services are 2016-vintage and are not used here. Unlike Saint Paul's, this layer carries no building-type field, so none of its 311 buildings can be told apart as a house or a storefront from the published data — the program covers both. The map labels them 'use not recorded' rather than guessing.",
   },
   {
     id: "stpaul-tif",
@@ -110,6 +126,7 @@ export const SOURCES: Source[] = [
     category: "feeds",
     format: "Live feature service",
     layer: "tif",
+    short: "Saint Paul HRA & Port Authority",
     description:
       "All TIF districts established by the Saint Paul Housing and Redevelopment Authority and the Saint Paul Port Authority, plus the project areas they sit within and the parcels participating in each. Each district carries its number, type, certification date, required decertification date, and the tax increment received and expended as filed with the State Auditor. 64 districts at last fetch, 29 of them typed 'Housing'.",
     caveat:
@@ -117,17 +134,56 @@ export const SOURCES: Source[] = [
   },
   {
     id: "hennepin-cooling",
-    title: "Hennepin County Cooling Option Map",
+    title: "Hennepin County Cooling Option Map (\"MasterList2021\")",
     url: "https://hennepin.maps.arcgis.com/apps/webappviewer/index.html?id=9cde49f4f25d4cca885e58a967ec786f",
     publisher: "Hennepin County",
     year: "2026",
     category: "feeds",
     format: "Live feature service",
     layer: "relief",
+    short: "Hennepin County Cooling Option Map",
     description:
-      "The county's master list of places to get out of the heat: libraries, recreation and community centers, government buildings, shopping malls, movie theaters, and Salvation Army offices, plus outdoor beaches and wading pools. Each point carries an address, phone, hours, website, and whether there is a fee to enter. The county's own app also overlays transit routes and downtown skyway walking areas. This map keeps the indoor, currently-active subset — 211 locations, 167 of them free.",
+      "The county's master list of places to get out of the heat: libraries, recreation and community centers, government buildings, shopping malls, movie theaters, and Salvation Army offices, plus outdoor beaches, wading pools, park reserves and aquatic parks. Each point carries an address, phone, hours, website, a free-text note, and whether there is a fee to enter. The county's own app also overlays transit routes and downtown skyway walking areas. This map keeps the indoor, currently-active subset — 192 locations, 162 of them free to enter.",
     caveat:
-      "The county's own disclaimer: operating status, hours, and restrictions change without their knowledge — verify with the location before relying on it. This is a heat-relief list, not a shelter-bed list; see the note on shelter data below.",
+      "The county's own disclaimer: operating status, hours, and restrictions change without their knowledge — verify with the location before relying on it, and note that a few rows still read Active while their own note says the site is closed for construction. This is a cooling list, not a shelter-bed list; see the note on shelter data below. Deciding which rows are indoors takes some judgment: the county's 'Swimming Pool' type covers both indoor aquatic centers and outdoor water parks, and only the free-text note says which, so this map reads that note and keeps the pools whose note doesn't describe them as outdoor-only. The backing feature service is still named 'MasterList2021' from when it was first published, but it is live: its rows were last edited July 21, 2026, and the app item itself June 30, 2026.",
+  },
+
+  // --- Rules: what a dot on the vacant layer actually means ----------------
+  {
+    id: "stpaul-vb-rules",
+    title: "Saint Paul Safety & Inspections — Vacant Buildings",
+    url: "https://www.stpaul.gov/departments/safety-inspections/vacant-buildings",
+    publisher: "City of Saint Paul, Department of Safety & Inspections",
+    year: null,
+    category: "rules",
+    format: "Government page",
+    layer: "vacant",
+    description:
+      "The city's own statement of when an owner must register a building as vacant: when it is unoccupied and also unsecured, secured by other than normal means, a dangerous structure, condemned, carrying multiple housing or building code violations, condemned and illegally occupied, or unoccupied longer than a year while under an order to correct nuisance conditions. Also the page that defines the three sale categories the map colors by — Category I (registration, fees, utilities restored, Truth-in-Sale-of-Housing report), Category II (no sale without city approval, code compliance report, contractor estimates, repair schedule, proof of financial capacity), and Category III (no sale without a Certificate of Code Compliance or Certificate of Occupancy).",
+  },
+  {
+    id: "mpls-vbr-rules",
+    title: "Minneapolis Vacant Building Registration — program page",
+    url: "https://www.minneapolismn.gov/business-services/licenses-permits-inspections/housing-code/vacant-building-registration/",
+    publisher: "City of Minneapolis, Community Planning & Economic Development",
+    year: null,
+    category: "rules",
+    format: "Government page",
+    layer: "vacant",
+    description:
+      "Minneapolis' conditions for requiring registration, in the city's words: condemned and requiring a code compliance inspection; unoccupied and unsecured for five or more days; secured by means other than those normally used in the design of the building for 30 days or more; carrying numerous housing, fire or building code violations for 30 days or more; unoccupied more than 365 days with an outstanding nuisance correction order; or unable to obtain a certificate of occupancy because of a work stoppage or expired permits. The page states the program applies to 'any residential or commercial building' — which is why this map does not describe a Minneapolis dot as a house.",
+  },
+  {
+    id: "mpls-ch249",
+    title: "Minneapolis Code of Ordinances ch. 249 — Vacant Dwellings and Buildings; Nuisance Conditions",
+    url: "https://library.municode.com/mn/minneapolis/codes/code_of_ordinances?nodeId=COOR_TIT12HO_CH249VADWBUNUCO",
+    publisher: "City of Minneapolis (via Municode)",
+    year: null,
+    category: "rules",
+    format: "City ordinance",
+    layer: "vacant",
+    description:
+      "The ordinance itself, including MCO 249.80, which establishes the registration program, and 249.80(h), which requires a new owner to register or re-register a vacant building within 30 days of any transfer of an ownership interest. The registration duty follows the building, not the buyer's intentions — which is why a sale doesn't clear a property off this map.",
   },
 
   // --- Maps and portals ----------------------------------------------------
@@ -363,6 +419,16 @@ export const SOURCES: Source[] = [
       "The Minnesota Charitable Solicitation Act. Sets the threshold above which an organization soliciting donations must register with the Attorney General — the compliance step a grass-roots funding drive crosses before it realizes it has.",
   },
 ];
+
+/**
+ * The feeds a layer is drawn from, for the citation line the map shows
+ * under every layer's controls. Derived rather than hand-listed in the
+ * component: a layer whose source changes here can't end up cited as the
+ * old one on the map.
+ */
+export function feedSourcesForLayer(layer: LayerKind): Source[] {
+  return SOURCES.filter((s) => s.layer === layer && s.category === "feeds");
+}
 
 export const SOURCES_BY_CATEGORY: Record<SourceCategory, Source[]> = CATEGORY_ORDER.reduce(
   (acc, category) => {

@@ -5,8 +5,11 @@ import Link from "next/link";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Feature, FeatureCollection } from "geojson";
-import type { City, FeatureProperties, LayerKind, Tally } from "@/lib/types";
+import type { BuildingUse, City, FeatureProperties, LayerKind, Tally } from "@/lib/types";
 import {
+  BUILDING_USES,
+  BUILDING_USE_LABEL,
+  DWELLING_TYPE_USE,
   LAYER_BLURB,
   LAYER_COLOR,
   LAYER_LABEL,
@@ -14,8 +17,10 @@ import {
   TIF_OTHER_COLOR,
   VACANT_CATEGORY_COLOR,
   VACANT_UNCATEGORIZED_COLOR,
+  buildingUse,
   formatDollars,
 } from "@/lib/housingTheme";
+import { feedSourcesForLayer } from "@/lib/sources";
 import SiteModal from "./SiteModal";
 
 // Same OpenFreeMap "Liberty" style the sibling MN civic-data map tools use,
@@ -60,6 +65,25 @@ const VACANT_COLOR_EXPRESSION = [
   VACANT_UNCATEGORIZED_COLOR,
 ] as unknown as maplibregl.ExpressionSpecification;
 
+/**
+ * Saint Paul's raw dwelling type, resolved to the coarse use the checkboxes
+ * filter on. Written as a style expression rather than as a property baked
+ * into the GeoJSON so the grouping can be changed without re-running
+ * scripts/fetch-vacant.mjs — and, more importantly, so the file on disk
+ * keeps the city's own words instead of this app's summary of them.
+ *
+ * The `match` default is "unrecorded", which covers both Minneapolis (no
+ * dwelling-type field at all, so `get` returns nothing) and any new type
+ * Saint Paul adds later — an unknown type shows up as unclassified rather
+ * than being quietly filed under whichever bucket looked closest.
+ */
+const USE_EXPRESSION = [
+  "match",
+  ["coalesce", ["get", "dwellingType"], ""],
+  ...Object.entries(DWELLING_TYPE_USE).flatMap(([dwellingType, use]) => [dwellingType, use]),
+  "unrecorded",
+];
+
 const TIF_COLOR_EXPRESSION = [
   "case",
   ["==", ["get", "districtType"], "Housing"],
@@ -95,6 +119,7 @@ function normalize(raw: Record<string, unknown> | null | undefined): FeatureProp
     incrementExpended: nullable("incrementExpended"),
     projectArea: nullable("projectArea"),
     hours: nullable("hours"),
+    notes: nullable("notes"),
     phone: nullable("phone"),
     website: nullable("website"),
   } as unknown as FeatureProperties;
@@ -102,14 +127,17 @@ function normalize(raw: Record<string, unknown> | null | undefined): FeatureProp
 
 function computeTally(vacant: FeatureCollection, tif: FeatureCollection, relief: FeatureCollection): Tally {
   const vacantByCity: Record<City, number> = { Minneapolis: 0, "St. Paul": 0 };
+  const vacantByUse: Record<BuildingUse, number> = { home: 0, business: 0, mixed: 0, unrecorded: 0 };
   for (const f of vacant.features) {
     const city = f.properties?.city as City | undefined;
     if (city && city in vacantByCity) vacantByCity[city] += 1;
+    vacantByUse[buildingUse((f.properties?.dwellingType as string | null) ?? null)] += 1;
   }
   const housing = tif.features.filter((f) => f.properties?.districtType === "Housing");
   return {
     vacantTotal: vacant.features.length,
     vacantByCity,
+    vacantByUse,
     housingTifDollars: housing.reduce((sum, f) => sum + (Number(f.properties?.incrementReceived) || 0), 0),
     housingTifCount: housing.length,
     reliefFreeCount: relief.features.filter((f) => f.properties?.free === true).length,
@@ -139,6 +167,53 @@ interface Selected {
   pinned: boolean;
 }
 
+/**
+ * The citation line under every layer's controls: who published this data,
+ * linked to the publisher's own copy, plus a link into the sources page
+ * entry describing what the file actually contains and where it falls short.
+ *
+ * On the layer itself rather than only on /sources, because a reader
+ * deciding what a dot means is deciding it here, with the map in front of
+ * them — a citation one page away is one they will not go and check.
+ */
+function LayerCitation({ kind }: { kind: LayerKind }) {
+  const feeds = feedSourcesForLayer(kind);
+  return (
+    <p className="border-t border-neutral-100 pt-2 text-[11px] leading-snug text-neutral-500">
+      Data:{" "}
+      {feeds.map((source, i) => (
+        <span key={source.id}>
+          {i > 0 && " · "}
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:text-neutral-900"
+          >
+            {source.short ?? source.publisher}
+          </a>
+        </span>
+      ))}
+      {feeds[0] && (
+        <>
+          {" · "}
+          <Link href={`/sources#${feeds[0].id}`} className="underline underline-offset-2 hover:text-neutral-900">
+            what&rsquo;s in it
+          </Link>
+        </>
+      )}
+      {kind === "vacant" && (
+        <>
+          {" · "}
+          <Link href="/sources#rules" className="underline underline-offset-2 hover:text-neutral-900">
+            why a building lands here
+          </Link>
+        </>
+      )}
+    </p>
+  );
+}
+
 export default function HousingMap() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -151,6 +226,13 @@ export default function HousingMap() {
   const activeRef = useRef(active);
   const [visibleCities, setVisibleCities] = useState<Record<City, boolean>>({ Minneapolis: true, "St. Paul": true });
   const visibleCitiesRef = useRef(visibleCities);
+  const [visibleUses, setVisibleUses] = useState<Record<BuildingUse, boolean>>({
+    home: true,
+    business: true,
+    mixed: true,
+    unrecorded: true,
+  });
+  const visibleUsesRef = useRef(visibleUses);
   const [housingOnly, setHousingOnly] = useState(false);
   const housingOnlyRef = useRef(housingOnly);
   const [freeOnly, setFreeOnly] = useState(true);
@@ -166,6 +248,9 @@ export default function HousingMap() {
   useEffect(() => {
     visibleCitiesRef.current = visibleCities;
   }, [visibleCities]);
+  useEffect(() => {
+    visibleUsesRef.current = visibleUses;
+  }, [visibleUses]);
   useEffect(() => {
     housingOnlyRef.current = housingOnly;
   }, [housingOnly]);
@@ -210,7 +295,12 @@ export default function HousingMap() {
 
     if (map.getLayer(VACANT_CIRCLE)) {
       const cities = CITIES.filter((c) => visibleCitiesRef.current[c]);
-      map.setFilter(VACANT_CIRCLE, ["in", ["get", "city"], ["literal", cities]] as unknown as maplibregl.FilterSpecification);
+      const uses = BUILDING_USES.filter((u) => visibleUsesRef.current[u]);
+      map.setFilter(VACANT_CIRCLE, [
+        "all",
+        ["in", ["get", "city"], ["literal", cities]],
+        ["in", USE_EXPRESSION, ["literal", uses]],
+      ] as unknown as maplibregl.FilterSpecification);
     }
     // `null` clears a layer's filter outright. An always-true expression
     // would work too, but MapLibre validates filters against the style spec
@@ -277,6 +367,17 @@ export default function HousingMap() {
       if (!next[city] && selectedRef.current?.properties.city === city) setSelected(null);
       return next;
     });
+  };
+
+  const toggleUse = (use: BuildingUse) => {
+    const next = { ...visibleUsesRef.current, [use]: !visibleUsesRef.current[use] };
+    visibleUsesRef.current = next;
+    setVisibleUses(next);
+    applyFilters();
+    // Same reasoning as toggleCity: a modal for a filtered-out building is
+    // describing something the reader can no longer see.
+    const selectedSite = selectedRef.current?.properties;
+    if (selectedSite?.kind === "vacant" && !next[buildingUse(selectedSite.dwellingType)]) setSelected(null);
   };
 
   useEffect(() => {
@@ -498,8 +599,9 @@ export default function HousingMap() {
               {active.vacant && (
                 <p>
                   <strong className="text-amber-800">{tally.vacantTotal.toLocaleString("en-US")}</strong> buildings
-                  registered vacant — {tally.vacantByCity.Minneapolis} in Minneapolis, {tally.vacantByCity["St. Paul"]}{" "}
-                  in Saint Paul.
+                  registered vacant — {tally.vacantByUse.home} homes, {tally.vacantByUse.business} businesses,{" "}
+                  {tally.vacantByUse.mixed} mixed-use, and {tally.vacantByUse.unrecorded} Minneapolis records with no
+                  building type.
                 </p>
               )}
               {active.tif && (
@@ -510,8 +612,8 @@ export default function HousingMap() {
               )}
               {active.relief && (
                 <p>
-                  <strong className="text-teal-700">{tally.reliefFreeCount}</strong> free indoor locations across
-                  Hennepin County.
+                  <strong className="text-teal-700">{tally.reliefFreeCount}</strong> cooling sites across Hennepin
+                  County you can enter for free.
                 </p>
               )}
               {!activeCount && <p>No layers shown. Switch one on below.</p>}
@@ -570,6 +672,37 @@ export default function HousingMap() {
                           </label>
                         ))}
                       </div>
+
+                      {/* "Empty" on its own doesn't say empty *what*. Saint
+                          Paul publishes a dwelling type, so the split
+                          between houses, storefronts and mixed-use blocks is
+                          in the data and belongs on screen — including the
+                          bucket Minneapolis leaves blank, which is a third
+                          of the layer and shouldn't look like a home. */}
+                      <div>
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+                          What kind of building
+                        </p>
+                        <div className="mt-1 space-y-0.5">
+                          {BUILDING_USES.map((use) => (
+                            <label key={use} className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={visibleUses[use]}
+                                onChange={() => toggleUse(use)}
+                                className="cursor-pointer"
+                              />
+                              <span className="flex-1">{BUILDING_USE_LABEL[use]}</span>
+                              {tally && <span className="tabular-nums text-neutral-500">{tally.vacantByUse[use]}</span>}
+                            </label>
+                          ))}
+                        </div>
+                        <p className="mt-1 text-[11px] leading-snug text-neutral-500">
+                          Saint Paul records what each building is; Minneapolis&rsquo; register carries no building-type
+                          field, so its 311 buildings are unclassified rather than assumed to be homes.
+                        </p>
+                      </div>
+
                       <div className="space-y-1">
                         {Object.entries(VACANT_CATEGORY_COLOR).map(([category, color]) => (
                           <div key={category} className="flex items-center gap-2 text-xs text-neutral-600">
@@ -623,6 +756,8 @@ export default function HousingMap() {
                       Free to enter only
                     </label>
                   )}
+
+                  <LayerCitation kind={kind} />
                 </div>
               )}
             </div>

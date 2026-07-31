@@ -33,15 +33,38 @@ const OUTPUT_PATH = path.join(__dirname, "../public/relief.geojson");
 const COOLING_OPTIONS_URL =
   "https://services1.arcgis.com/ziLNoRgqnICUM0q1/arcgis/rest/services/CoolingOption2021_View/FeatureServer/0";
 
-// Everything except beaches and wading pools, which are outdoors and so
-// don't answer the "somewhere indoors" question this layer exists for.
-// Matched case-insensitively against the source's `Type` field.
-const OUTDOOR_TYPES = ["beach", "wading pool", "park facility", "splash pad"];
+// Types that are outdoors by definition and so don't answer the "somewhere
+// indoors" question this layer exists for. Matched case-insensitively as a
+// substring of the source's `Type`.
+//
+// "park facilit" rather than "park facility": the county's actual value is
+// the plural "Park Facilities", and the singular spelling silently let six
+// outdoor sites — Elm Creek Park Reserve, Fort Snelling State Park, the
+// Bloomington wildlife refuge visitor center — onto a layer this app
+// describes as indoor. Checked against the live service on 2026-07-31.
+const OUTDOOR_TYPES = ["beach", "wading pool", "park facilit", "splash pad"];
 
-function isIndoor(type) {
+// `Swimming Pool` is the one type the county genuinely mixes: 25 active
+// rows covering both indoor aquatic centers and outdoor water parks, with
+// nothing in `Type` or any other structured field to tell them apart. The
+// county does say which in its free-text `Notes` ("Outdoor aquatic park",
+// "Indoor pools"), so that's what this reads.
+//
+// Only for pools, and only when the notes don't also mention indoor: three
+// rec centers and one campground describe an indoor pool alongside an
+// outdoor splash pad, and a blanket "notes mention outdoor" rule would
+// throw those away.
+function isOutdoorPool(type, notes) {
+  if (!/swimming pool/i.test(type ?? "")) return false;
+  const text = (notes ?? "").toLowerCase();
+  return text.includes("outdoor") && !text.includes("indoor");
+}
+
+function isIndoor(type, notes) {
   if (!type) return true; // unlabeled rows are kept; the modal shows the raw type
   const lower = type.toLowerCase();
-  return !OUTDOOR_TYPES.some((t) => lower.includes(t));
+  if (OUTDOOR_TYPES.some((t) => lower.includes(t))) return false;
+  return !isOutdoorPool(type, notes);
 }
 
 async function main() {
@@ -59,7 +82,7 @@ async function main() {
       const status = toText(f.properties?.Status);
       return status === null || status.toLowerCase() === "active";
     })
-    .filter((f) => isIndoor(toText(f.properties?.Type)))
+    .filter((f) => isIndoor(toText(f.properties?.Type), toText(f.properties?.Notes)))
     .map((f) => {
       const p = f.properties ?? {};
       const type = toText(p.Type) ?? "Public building";
@@ -75,6 +98,12 @@ async function main() {
           hours: toText(p.Hours),
           phone: toText(p.Phone),
           website: toText(p.Website),
+          // The county's free-text note, kept verbatim. It's where the
+          // things a person actually needs live — "Indoor pools", "Youth
+          // under 18 free, adults $5", "CLOSED FOR CONSTRUCTION 6/15/26" on
+          // a row whose Status still says Active. Dropping it was throwing
+          // away the most useful field on the layer.
+          notes: toText(p.Notes),
           // The source stores this as the string "Yes"/"No" under `Fee`,
           // i.e. whether there IS a fee — inverted here so the property
           // name matches what it asserts and can't be misread downstream.
