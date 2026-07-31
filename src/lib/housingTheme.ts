@@ -72,7 +72,7 @@ export const REGISTRATION_CAVEAT =
  * useless to someone deciding where to walk to. Expanded for display only;
  * the raw value stays in the data so it still matches the county's file.
  */
-export const RELIEF_TYPE_LABEL: Record<string, string> = {
+const RELIEF_TYPE_LABEL: Record<string, string> = {
   "Rec Com Cntr": "Recreation or community center",
   "Govt Bldg": "Government building",
   "Misc Site": "Other public site",
@@ -163,11 +163,6 @@ export const VACANT_UNCATEGORIZED_COLOR = "#A16207"; // yellow-700
 // read as the "figure" and everything else as the "ground."
 export const TIF_HOUSING_COLOR = "#7C3AED"; // violet-600
 export const TIF_OTHER_COLOR = "#A5B4FC"; // indigo-300
-
-export function vacantColor(category: string | null): string {
-  if (category === null) return VACANT_UNCATEGORIZED_COLOR;
-  return VACANT_CATEGORY_COLOR[category] ?? VACANT_UNCATEGORIZED_COLOR;
-}
 
 const DOLLARS = new Intl.NumberFormat("en-US", {
   style: "currency",
