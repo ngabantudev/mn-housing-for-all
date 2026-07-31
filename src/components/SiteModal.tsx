@@ -1,7 +1,19 @@
 "use client";
 
-import type { FeatureProperties, ReliefProperties, TifProperties, VacantProperties } from "@/lib/types";
-import { LAYER_COLOR, LAYER_COLOR_SOFT, formatDate, formatDollars, formatDuration } from "@/lib/housingTheme";
+import Link from "next/link";
+import type { FeatureProperties, LayerKind, ReliefProperties, TifProperties, VacantProperties } from "@/lib/types";
+import {
+  LAYER_COLOR,
+  LAYER_COLOR_SOFT,
+  REGISTRATION_CAVEAT,
+  REGISTRATION_TRIGGER,
+  buildingNoun,
+  reliefTypeLabel,
+  formatDate,
+  formatDollars,
+  formatDuration,
+} from "@/lib/housingTheme";
+import { feedSourcesForLayer } from "@/lib/sources";
 
 // Saint Paul's own descriptions of what each vacant-building category
 // obliges an owner to do, condensed from the city's Vacant Buildings Map
@@ -26,15 +38,23 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 function VacantBody({ site }: { site: VacantProperties }) {
   const duration = formatDuration(site.vacantSince);
   const meaning = site.category ? CATEGORY_MEANING[site.category] : null;
+  // "Empty duplex for 7 years" carries the whole argument in one line where
+  // "Empty for 7 years" left a reader to picture whatever they liked —
+  // usually a house, which is wrong for the 73 commercial buildings and the
+  // 14 mixed-use ones on this layer. Where the city publishes no type the
+  // noun stays "building", which is the most the record supports.
+  const noun = buildingNoun(site.dwellingType);
   return (
     <>
-      {duration && (
-        // The headline number, not a field in the list: "empty for 7 years"
-        // is the whole point of putting this building on a map, and burying
-        // it in a definition list would waste it.
+      {duration ? (
+        // The headline, not a field in the list: what it is and how long
+        // it's been empty is the whole point of putting this building on a
+        // map, and burying either in a definition list would waste it.
         <p className="text-2xl font-semibold text-amber-800 leading-tight">
-          Empty for {duration}
+          Empty {noun} &mdash; {duration}
         </p>
+      ) : (
+        <p className="text-2xl font-semibold text-amber-800 leading-tight">Empty {noun}</p>
       )}
       <dl className="mt-3 space-y-1.5">
         <Row label="City" value={site.city} />
@@ -51,10 +71,21 @@ function VacantBody({ site }: { site: VacantProperties }) {
       {meaning && <p className="mt-3 text-sm text-neutral-600 leading-snug">{meaning}</p>}
       {site.category === null && (
         <p className="mt-3 text-sm text-neutral-500 leading-snug">
-          Minneapolis&rsquo; register doesn&rsquo;t rate buildings by severity the way Saint Paul&rsquo;s does, so
-          there&rsquo;s no category here.
+          Minneapolis&rsquo; register doesn&rsquo;t rate buildings by severity the way Saint Paul&rsquo;s does, and
+          carries no building-type field either, so there&rsquo;s no category or use here. The program covers
+          residential and commercial buildings alike.
         </p>
       )}
+
+      {/* Why it's on the register at all. Without this a reader supplies
+          their own explanation — abandoned, derelict, nobody wants it —
+          when what the record actually says is narrower and duller: it met
+          one of the ordinance's conditions. */}
+      <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2">
+        <p className="text-xs font-medium uppercase tracking-wide text-amber-800">Why it&rsquo;s registered</p>
+        <p className="mt-1 text-sm leading-snug text-neutral-700">{REGISTRATION_TRIGGER[site.city]}</p>
+        <p className="mt-1.5 text-xs leading-snug text-neutral-500">{REGISTRATION_CAVEAT}</p>
+      </div>
     </>
   );
 }
@@ -98,10 +129,15 @@ function TifBody({ site }: { site: TifProperties }) {
 function ReliefBody({ site }: { site: ReliefProperties }) {
   return (
     <>
-      <p className="text-lg font-semibold text-teal-700 leading-tight">{site.type}</p>
+      <p className="text-lg font-semibold text-teal-700 leading-tight">{reliefTypeLabel(site.type)}</p>
       <dl className="mt-3 space-y-1.5">
         <Row label="Address" value={`${site.address}, ${site.city}`} />
         <Row label="Hours" value={site.hours} />
+        {/* The county's own note, verbatim. It's the field that says whether
+            the pool is indoors, what a non-swimming adult pays, and — on
+            rows the county hasn't re-statused — that the place is shut for
+            the season. */}
+        <Row label="County note" value={site.notes} />
         <Row label="Phone" value={site.phone ? <a className="underline" href={`tel:${site.phone}`}>{site.phone}</a> : null} />
         <Row
           label="Cost"
@@ -129,6 +165,66 @@ export function siteTitle(site: FeatureProperties): string {
   return site.kind === "vacant" ? site.address : site.name;
 }
 
+const KIND_LABEL: Record<LayerKind, string> = {
+  vacant: "Vacant building",
+  tif: "TIF district",
+  // The county's own term for this list — see LAYER_LABEL in housingTheme.
+  relief: "Cooling site",
+};
+
+/**
+ * Where this record came from, on the record itself. Every claim in the
+ * modal above is the publisher's, not this project's, and a reader who
+ * doubts one should be one click from the file it was read out of rather
+ * than having to take the map's word for it.
+ */
+function SourceFooter({ site }: { site: FeatureProperties }) {
+  const feeds = feedSourcesForLayer(site.kind).filter(
+    // The vacant layer has one feed per city; cite the one this building is
+    // actually from, not both.
+    (source) => site.kind !== "vacant" || source.publisher.includes(site.city === "St. Paul" ? "Saint Paul" : "Minneapolis"),
+  );
+  if (feeds.length === 0) return null;
+  return (
+    <p className="mt-4 border-t border-neutral-100 pt-2.5 text-xs leading-snug text-neutral-500">
+      Source:{" "}
+      {feeds.map((source, i) => (
+        <span key={source.id}>
+          {i > 0 && " · "}
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:text-neutral-900"
+          >
+            {source.title}
+          </a>
+        </span>
+      ))}
+      {" · "}
+      <Link href={`/sources#${feeds[0].id}`} className="underline underline-offset-2 hover:text-neutral-900">
+        what this data does and doesn&rsquo;t contain
+      </Link>
+      {feeds.map((source) =>
+        source.credit ? (
+          <span key={`${source.id}-credit`} className="mt-1 block">
+            Brought to this project by {source.credit.name} of{" "}
+            <a
+              href={source.credit.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-neutral-900"
+            >
+              {source.credit.org}
+            </a>
+            .
+          </span>
+        ) : null,
+      )}
+    </p>
+  );
+}
+
 export default function SiteModal({
   site,
   pinned,
@@ -141,7 +237,16 @@ export default function SiteModal({
   const accent = LAYER_COLOR[site.kind];
   return (
     <div
-      className="pointer-events-auto w-full sm:w-[380px] max-h-[55dvh] sm:max-h-[70dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-neutral-200 font-sans"
+      // Handle for layout checks: whether this card overlaps the filter
+      // panel is a geometry question, and the only honest way to answer it
+      // is to measure both rects in a real viewport.
+      data-site-modal=""
+      // Breakpoint is `md`, not `sm`: at 640px a 20rem filter panel and a
+      // 22rem detail card don't both fit across the viewport, so the
+      // side-by-side layout has to wait for 768px. Height is capped in dvh
+      // so a long TIF record scrolls inside the card rather than running off
+      // the bottom of the screen.
+      className="pointer-events-auto w-full max-h-[55dvh] overflow-y-auto rounded-t-2xl border border-neutral-200 bg-white font-sans shadow-2xl md:max-h-[calc(100dvh-1.5rem)] md:w-88 md:rounded-2xl lg:w-95"
       style={{ borderTopColor: accent, borderTopWidth: 4 }}
     >
       <div className="p-4">
@@ -151,9 +256,9 @@ export default function SiteModal({
               className="inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
               style={{ backgroundColor: LAYER_COLOR_SOFT[site.kind], color: accent }}
             >
-              {site.kind === "vacant" ? "Vacant building" : site.kind === "tif" ? "TIF district" : "Heat relief"}
+              {KIND_LABEL[site.kind]}
             </span>
-            <h2 className="mt-1.5 text-base font-semibold text-neutral-900 leading-snug break-words">
+            <h2 className="mt-1.5 text-base font-semibold text-neutral-900 leading-snug wrap-break-word">
               {siteTitle(site)}
             </h2>
           </div>
@@ -175,6 +280,7 @@ export default function SiteModal({
           {site.kind === "vacant" && <VacantBody site={site} />}
           {site.kind === "tif" && <TifBody site={site} />}
           {site.kind === "relief" && <ReliefBody site={site} />}
+          <SourceFooter site={site} />
         </div>
       </div>
     </div>

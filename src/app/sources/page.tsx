@@ -23,7 +23,10 @@ function LayerBadge({ source }: { source: Source }) {
 
 function SourceCard({ source }: { source: Source }) {
   return (
-    <li className="rounded-xl border border-neutral-200 bg-white p-4 sm:p-5">
+    // The id is what the map's per-layer citation links to. scroll-mt keeps
+    // the card's own heading clear of the viewport edge on arrival, so a
+    // reader following a citation lands on the title rather than mid-card.
+    <li id={source.id} className="scroll-mt-6 rounded-xl border border-neutral-200 bg-white p-4 sm:p-5 target:ring-2 target:ring-neutral-900/15">
       <div className="flex flex-wrap items-center gap-2">
         <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-600">
           {source.format}
@@ -48,6 +51,24 @@ function SourceCard({ source }: { source: Source }) {
       </p>
 
       <p className="mt-2.5 text-sm leading-relaxed text-neutral-700">{source.description}</p>
+
+      {source.credit && (
+        // Above the caveat rather than in the footnotes: whoever brought a
+        // source to this project is part of where the data came from, not a
+        // postscript to it.
+        <p className="mt-2.5 rounded-lg bg-neutral-50 px-3 py-2 text-sm leading-relaxed text-neutral-700">
+          <span className="font-medium">Brought to this project by {source.credit.name}</span> of{" "}
+          <a
+            href={source.credit.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-neutral-300 underline-offset-2 hover:decoration-neutral-900"
+          >
+            {source.credit.org}
+          </a>
+          , who has been reading these districts far longer than this map has existed.
+        </p>
+      )}
 
       {source.caveat && (
         <p className="mt-2.5 border-l-2 border-amber-300 pl-3 text-sm leading-relaxed text-neutral-600">

@@ -1,4 +1,4 @@
-import type { LayerKind } from "./types";
+import type { BuildingUse, City, LayerKind } from "./types";
 
 // One hue per layer, chosen so the three can never be confused for each
 // other on screen or in the legend. Deliberately avoids red/blue: this app
@@ -19,20 +19,129 @@ export const LAYER_COLOR_SOFT: Record<LayerKind, string> = {
   relief: "#CCFBF1",
 };
 
+// One-word labels ("Empty", "Subsidy", "Relief") read as clever rather than
+// informative: they tell you a mood, not what the dots are. A reader landing
+// on this map cold should be able to name the dataset from the checkbox
+// alone, so each label is what the publishing agency itself calls the thing.
 export const LAYER_LABEL: Record<LayerKind, string> = {
-  vacant: "Empty",
-  tif: "Subsidy",
-  relief: "Relief",
+  vacant: "Vacant buildings",
+  tif: "Tax subsidy districts",
+  // Hennepin County's own name for this data is the "Cooling Option Map"
+  // (ArcGIS item 9cde49f4f25d4cca885e58a967ec786f, tagged Public Health).
+  // "Relief" was this project's invention; the county's word is better.
+  relief: "Cooling sites",
 };
 
-// The one-line "what am I looking at" under the mode toggle. Kept here
+// The one-line "what am I looking at" under each layer's checkbox. Kept here
 // rather than inline in the map component so the same wording can be
 // reused by the sources page without the two drifting apart.
 export const LAYER_BLURB: Record<LayerKind, string> = {
-  vacant: "Buildings registered as vacant with the city, and how long they've sat that way.",
+  vacant:
+    "Homes, businesses, and mixed-use buildings their owners had to register with the city as empty — because they were condemned, unsecured, or carrying code violations nobody fixed.",
   tif: "Saint Paul tax-increment districts — where property-tax growth is captured for redevelopment.",
-  relief: "Free, indoor, publicly accessible places across Hennepin County during a heat emergency.",
+  relief:
+    "Libraries, rec centers, public buildings and malls from Hennepin County's Cooling Option Map — indoor places to get out of the heat, and which of them cost nothing to enter.",
 };
+
+/**
+ * Why a building is on the register, in the cities' own terms.
+ *
+ * Neither register records a *reason for vacancy* — nobody files "the owner
+ * died", "the sale fell through", "it burned". What both record is which
+ * enforcement condition the building met, which is the closest thing to a
+ * "why" the public record actually contains. Reproduced here so the app can
+ * say it plainly instead of leaving a reader to assume the dots are just
+ * houses somebody forgot about.
+ */
+export const REGISTRATION_TRIGGER: Record<City, string> = {
+  "St. Paul":
+    "Saint Paul requires registration once a building is unoccupied and is unsecured, secured by other than normal means, dangerous, condemned, carrying multiple housing or building code violations, or has sat unoccupied over a year under an order to correct nuisance conditions.",
+  Minneapolis:
+    "Minneapolis requires registration for any residential or commercial building that is condemned and needs a code compliance inspection, unoccupied and unsecured five days or more, secured by abnormal means for 30 days, carrying numerous housing, fire or building code violations for 30 days, unoccupied over 365 days under a nuisance order, or unable to get a certificate of occupancy after a work stoppage or expired permit.",
+};
+
+// The register says a building met one of the conditions above. It does not
+// say which one — so the app says that too, rather than implying the dot
+// means "condemned" when it may mean "the permit expired."
+export const REGISTRATION_CAVEAT =
+  "The published register records that a building met one of those conditions, not which one.";
+
+/**
+ * Hennepin's `Type` values are internal abbreviations — "Rec Com Cntr",
+ * "Govt Bldg", "Misc Site" — which are fine in a county spreadsheet and
+ * useless to someone deciding where to walk to. Expanded for display only;
+ * the raw value stays in the data so it still matches the county's file.
+ */
+export const RELIEF_TYPE_LABEL: Record<string, string> = {
+  "Rec Com Cntr": "Recreation or community center",
+  "Govt Bldg": "Government building",
+  "Misc Site": "Other public site",
+  "Salvation Army": "Salvation Army location",
+  "Swimming Pool": "Pool or aquatic center",
+  "Movie Theater": "Movie theater",
+  "Shopping Mall": "Shopping mall",
+  Library: "Library",
+};
+
+export function reliefTypeLabel(type: string): string {
+  return RELIEF_TYPE_LABEL[type] ?? type;
+}
+
+/**
+ * Coarse building use, for the "is this an empty house or an empty
+ * storefront?" question. Saint Paul publishes DWELLING_TYPE; Minneapolis'
+ * file carries no equivalent field at all, so its 311 buildings are
+ * "not recorded" rather than silently counted as homes — the Minneapolis
+ * program covers "any residential or commercial building" and the published
+ * layer doesn't say which one any given address is.
+ */
+export const BUILDING_USES: BuildingUse[] = ["home", "business", "mixed", "unrecorded"];
+
+// Saint Paul's DWELLING_TYPE values, verbatim, grouped. Anything the city
+// adds later that isn't listed here falls through to "unrecorded" rather
+// than being guessed into a bucket.
+export const DWELLING_TYPE_USE: Record<string, BuildingUse> = {
+  "Single Family Residential": "home",
+  Duplex: "home",
+  "Multi-family Residential": "home",
+  Commercial: "business",
+  "Mixed Use": "mixed",
+};
+
+export const BUILDING_USE_LABEL: Record<BuildingUse, string> = {
+  home: "Homes",
+  business: "Businesses",
+  mixed: "Mixed use",
+  unrecorded: "Use not recorded",
+};
+
+export function buildingUse(dwellingType: string | null): BuildingUse {
+  if (dwellingType === null) return "unrecorded";
+  return DWELLING_TYPE_USE[dwellingType] ?? "unrecorded";
+}
+
+/**
+ * The plain-English noun for a single building, for the modal headline —
+ * "Empty duplex", not "Empty Duplex Residential". Saint Paul's own type
+ * string is the input, so a reader can still match what they see here
+ * against the city's record.
+ */
+export function buildingNoun(dwellingType: string | null): string {
+  switch (dwellingType) {
+    case "Single Family Residential":
+      return "single-family home";
+    case "Duplex":
+      return "duplex";
+    case "Multi-family Residential":
+      return "multi-family building";
+    case "Commercial":
+      return "commercial building";
+    case "Mixed Use":
+      return "mixed-use building";
+    default:
+      return "building";
+  }
+}
 
 // St. Paul's vacant-building categories escalate: 1 is a registration and
 // fee, 2 blocks sale until code orders are met, 3 is condemned and

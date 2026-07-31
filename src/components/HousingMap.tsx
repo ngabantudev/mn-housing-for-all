@@ -5,8 +5,11 @@ import Link from "next/link";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Feature, FeatureCollection } from "geojson";
-import type { City, FeatureProperties, LayerKind, Tally } from "@/lib/types";
+import type { BuildingUse, City, FeatureProperties, LayerKind, Tally } from "@/lib/types";
 import {
+  BUILDING_USES,
+  BUILDING_USE_LABEL,
+  DWELLING_TYPE_USE,
   LAYER_BLURB,
   LAYER_COLOR,
   LAYER_LABEL,
@@ -14,8 +17,10 @@ import {
   TIF_OTHER_COLOR,
   VACANT_CATEGORY_COLOR,
   VACANT_UNCATEGORIZED_COLOR,
+  buildingUse,
   formatDollars,
 } from "@/lib/housingTheme";
+import { feedSourcesForLayer } from "@/lib/sources";
 import SiteModal from "./SiteModal";
 
 // Same OpenFreeMap "Liberty" style the sibling MN civic-data map tools use,
@@ -25,7 +30,7 @@ const LIBERTY_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const TWIN_CITIES_CENTER: [number, number] = [-93.185, 44.955];
 const DEFAULT_ZOOM = 10.4;
 
-const MODES: LayerKind[] = ["vacant", "tif", "relief"];
+const LAYERS: LayerKind[] = ["vacant", "tif", "relief"];
 const CITIES: City[] = ["Minneapolis", "St. Paul"];
 
 const VACANT_SOURCE = "vacant-source";
@@ -37,10 +42,12 @@ const TIF_LABEL = "tif-label";
 const RELIEF_SOURCE = "relief-source";
 const RELIEF_CIRCLE = "relief-circle";
 
-// Which layers belong to which mode. Only one mode is on screen at a time:
-// 695 building points under 64 translucent polygons is unreadable, and the
-// three layers answer three different questions anyway.
-const MODE_LAYERS: Record<LayerKind, string[]> = {
+// The MapLibre layer ids each toggle owns. Any combination of the three can
+// be on screen at once, which is the point: "vacant houses inside a housing
+// TIF district" is a question you can only ask by looking at both at the
+// same time. Draw order keeps that readable — the TIF polygons are added
+// first and stay underneath, so points are never buried by a fill.
+const LAYER_IDS: Record<LayerKind, string[]> = {
   vacant: [VACANT_CIRCLE],
   tif: [TIF_FILL, TIF_OUTLINE, TIF_LABEL],
   relief: [RELIEF_CIRCLE],
@@ -57,6 +64,25 @@ const VACANT_COLOR_EXPRESSION = [
   ...Object.entries(VACANT_CATEGORY_COLOR).flatMap(([category, color]) => [category, color]),
   VACANT_UNCATEGORIZED_COLOR,
 ] as unknown as maplibregl.ExpressionSpecification;
+
+/**
+ * Saint Paul's raw dwelling type, resolved to the coarse use the checkboxes
+ * filter on. Written as a style expression rather than as a property baked
+ * into the GeoJSON so the grouping can be changed without re-running
+ * scripts/fetch-vacant.mjs — and, more importantly, so the file on disk
+ * keeps the city's own words instead of this app's summary of them.
+ *
+ * The `match` default is "unrecorded", which covers both Minneapolis (no
+ * dwelling-type field at all, so `get` returns nothing) and any new type
+ * Saint Paul adds later — an unknown type shows up as unclassified rather
+ * than being quietly filed under whichever bucket looked closest.
+ */
+const USE_EXPRESSION = [
+  "match",
+  ["coalesce", ["get", "dwellingType"], ""],
+  ...Object.entries(DWELLING_TYPE_USE).flatMap(([dwellingType, use]) => [dwellingType, use]),
+  "unrecorded",
+];
 
 const TIF_COLOR_EXPRESSION = [
   "case",
@@ -93,6 +119,7 @@ function normalize(raw: Record<string, unknown> | null | undefined): FeatureProp
     incrementExpended: nullable("incrementExpended"),
     projectArea: nullable("projectArea"),
     hours: nullable("hours"),
+    notes: nullable("notes"),
     phone: nullable("phone"),
     website: nullable("website"),
   } as unknown as FeatureProperties;
@@ -100,14 +127,17 @@ function normalize(raw: Record<string, unknown> | null | undefined): FeatureProp
 
 function computeTally(vacant: FeatureCollection, tif: FeatureCollection, relief: FeatureCollection): Tally {
   const vacantByCity: Record<City, number> = { Minneapolis: 0, "St. Paul": 0 };
+  const vacantByUse: Record<BuildingUse, number> = { home: 0, business: 0, mixed: 0, unrecorded: 0 };
   for (const f of vacant.features) {
     const city = f.properties?.city as City | undefined;
     if (city && city in vacantByCity) vacantByCity[city] += 1;
+    vacantByUse[buildingUse((f.properties?.dwellingType as string | null) ?? null)] += 1;
   }
   const housing = tif.features.filter((f) => f.properties?.districtType === "Housing");
   return {
     vacantTotal: vacant.features.length,
     vacantByCity,
+    vacantByUse,
     housingTifDollars: housing.reduce((sum, f) => sum + (Number(f.properties?.incrementReceived) || 0), 0),
     housingTifCount: housing.length,
     reliefFreeCount: relief.features.filter((f) => f.properties?.free === true).length,
@@ -137,15 +167,90 @@ interface Selected {
   pinned: boolean;
 }
 
+/**
+ * The citation line under every layer's controls: who published this data,
+ * linked to the publisher's own copy, plus a link into the sources page
+ * entry describing what the file actually contains and where it falls short.
+ *
+ * On the layer itself rather than only on /sources, because a reader
+ * deciding what a dot means is deciding it here, with the map in front of
+ * them — a citation one page away is one they will not go and check.
+ */
+function LayerCitation({ kind }: { kind: LayerKind }) {
+  const feeds = feedSourcesForLayer(kind);
+  return (
+    <p className="border-t border-neutral-100 pt-2 text-[11px] leading-snug text-neutral-500">
+      Data:{" "}
+      {feeds.map((source, i) => (
+        <span key={source.id}>
+          {i > 0 && " · "}
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:text-neutral-900"
+          >
+            {source.short ?? source.publisher}
+          </a>
+        </span>
+      ))}
+      {feeds[0] && (
+        <>
+          {" · "}
+          <Link href={`/sources#${feeds[0].id}`} className="underline underline-offset-2 hover:text-neutral-900">
+            what&rsquo;s in it
+          </Link>
+        </>
+      )}
+      {kind === "vacant" && (
+        <>
+          {" · "}
+          <Link href="/sources#rules" className="underline underline-offset-2 hover:text-neutral-900">
+            why a building lands here
+          </Link>
+        </>
+      )}
+      {/* The person who brought the layer here, credited on the layer
+          itself. Someone had to know this data existed and that it was
+          worth mapping; that doesn't show up anywhere in the file. */}
+      {feeds.map((source) =>
+        source.credit ? (
+          <span key={`${source.id}-credit`}>
+            {" · via "}
+            <a
+              href={source.credit.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-neutral-900"
+            >
+              {source.credit.org}
+            </a>
+          </span>
+        ) : null,
+      )}
+    </p>
+  );
+}
+
 export default function HousingMap() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const boundsRef = useRef<Partial<Record<LayerKind, maplibregl.LngLatBounds>>>({});
 
-  const [mode, setMode] = useState<LayerKind>("vacant");
-  const modeRef = useRef(mode);
+  // Every layer starts on. The map's whole argument is the three datasets
+  // read against each other, so the default view is all of them and the
+  // checkboxes are there to subtract, not to assemble.
+  const [active, setActive] = useState<Record<LayerKind, boolean>>({ vacant: true, tif: true, relief: true });
+  const activeRef = useRef(active);
   const [visibleCities, setVisibleCities] = useState<Record<City, boolean>>({ Minneapolis: true, "St. Paul": true });
   const visibleCitiesRef = useRef(visibleCities);
+  const [visibleUses, setVisibleUses] = useState<Record<BuildingUse, boolean>>({
+    home: true,
+    business: true,
+    mixed: true,
+    unrecorded: true,
+  });
+  const visibleUsesRef = useRef(visibleUses);
   const [housingOnly, setHousingOnly] = useState(false);
   const housingOnlyRef = useRef(housingOnly);
   const [freeOnly, setFreeOnly] = useState(true);
@@ -153,13 +258,22 @@ export default function HousingMap() {
   const [selected, setSelected] = useState<Selected | null>(null);
   const selectedRef = useRef<Selected | null>(null);
   const [tally, setTally] = useState<Tally | null>(null);
+  // Phone-only: the layer checkboxes and filters are a tall column, and
+  // pinning them open over a 375px-wide map leaves no map. Starts closed and
+  // is CSS-forced open from `md` up, so the desktop layout never depends on
+  // this and there's no first-paint flicker from measuring the viewport.
+  const [panelOpen, setPanelOpen] = useState(false);
+  const activeCount = LAYERS.filter((kind) => active[kind]).length;
 
   useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
+    activeRef.current = active;
+  }, [active]);
   useEffect(() => {
     visibleCitiesRef.current = visibleCities;
   }, [visibleCities]);
+  useEffect(() => {
+    visibleUsesRef.current = visibleUses;
+  }, [visibleUses]);
   useEffect(() => {
     housingOnlyRef.current = housingOnly;
   }, [housingOnly]);
@@ -170,11 +284,42 @@ export default function HousingMap() {
     selectedRef.current = selected;
   }, [selected]);
 
-  const zoomToDefault = (target: LayerKind = modeRef.current) => {
+  /**
+   * Padding for every fitBounds, sized around the UI that sits on top of the
+   * map rather than around the canvas. A flat 40px centered the data under
+   * the filter panel on a desktop and under the header card on a phone,
+   * which reads as "there's nothing over there" — the dots were there, just
+   * beneath an opaque card.
+   *
+   * Read at call time, not captured once: a window can be resized across the
+   * breakpoint between the initial fit and a later "Zoom to".
+   */
+  const fitPadding = (): maplibregl.PaddingOptions =>
+    isMobileViewport()
+      ? { top: 230, bottom: 32, left: 20, right: 20 }
+      : { top: 32, bottom: 32, left: 352, right: 32 };
+
+  const zoomToLayer = (target: LayerKind) => {
     const map = mapRef.current;
     const bounds = boundsRef.current[target];
     if (!map || !bounds || bounds.isEmpty()) return;
-    map.fitBounds(bounds, { padding: 40, duration: 600 });
+    map.fitBounds(bounds, { padding: fitPadding(), duration: 600 });
+  };
+
+  /**
+   * The extent of everything currently switched on. With three layers
+   * co-visible there's no single "the" layer to frame on, and framing on
+   * one of them silently pushes the others off screen — which reads as
+   * "that layer has no data here" rather than "you're zoomed past it."
+   */
+  const activeBounds = (): maplibregl.LngLatBounds | null => {
+    const combined = new maplibregl.LngLatBounds();
+    for (const kind of LAYERS) {
+      const b = boundsRef.current[kind];
+      if (!activeRef.current[kind] || !b || b.isEmpty()) continue;
+      combined.extend(b);
+    }
+    return combined.isEmpty() ? null : combined;
   };
 
   // Every filter the UI can set, re-derived from current state and applied
@@ -188,7 +333,12 @@ export default function HousingMap() {
 
     if (map.getLayer(VACANT_CIRCLE)) {
       const cities = CITIES.filter((c) => visibleCitiesRef.current[c]);
-      map.setFilter(VACANT_CIRCLE, ["in", ["get", "city"], ["literal", cities]] as unknown as maplibregl.FilterSpecification);
+      const uses = BUILDING_USES.filter((u) => visibleUsesRef.current[u]);
+      map.setFilter(VACANT_CIRCLE, [
+        "all",
+        ["in", ["get", "city"], ["literal", cities]],
+        ["in", USE_EXPRESSION, ["literal", uses]],
+      ] as unknown as maplibregl.FilterSpecification);
     }
     // `null` clears a layer's filter outright. An always-true expression
     // would work too, but MapLibre validates filters against the style spec
@@ -224,23 +374,25 @@ export default function HousingMap() {
     setSelected(null);
   };
 
-  const applyMode = (next: LayerKind) => {
+  const applyVisibility = () => {
     const map = mapRef.current;
     if (!map) return;
-    for (const [groupMode, ids] of Object.entries(MODE_LAYERS) as [LayerKind, string[]][]) {
+    for (const [kind, ids] of Object.entries(LAYER_IDS) as [LayerKind, string[]][]) {
+      const visibility = activeRef.current[kind] ? "visible" : "none";
       for (const id of ids) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", groupMode === next ? "visible" : "none");
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
       }
     }
   };
 
-  const switchMode = (next: LayerKind) => {
-    if (next === modeRef.current) return;
-    modeRef.current = next;
-    setMode(next);
-    setSelected(null);
-    applyMode(next);
-    zoomToDefault(next);
+  const toggleLayer = (kind: LayerKind) => {
+    const next = { ...activeRef.current, [kind]: !activeRef.current[kind] };
+    activeRef.current = next;
+    setActive(next);
+    applyVisibility();
+    // A modal describing a feature on a layer that just went away is
+    // pointing at nothing on screen — close it rather than strand it.
+    if (!next[kind] && selectedRef.current?.properties.kind === kind) setSelected(null);
   };
 
   const toggleCity = (city: City) => {
@@ -253,6 +405,17 @@ export default function HousingMap() {
       if (!next[city] && selectedRef.current?.properties.city === city) setSelected(null);
       return next;
     });
+  };
+
+  const toggleUse = (use: BuildingUse) => {
+    const next = { ...visibleUsesRef.current, [use]: !visibleUsesRef.current[use] };
+    visibleUsesRef.current = next;
+    setVisibleUses(next);
+    applyFilters();
+    // Same reasoning as toggleCity: a modal for a filtered-out building is
+    // describing something the reader can no longer see.
+    const selectedSite = selectedRef.current?.properties;
+    if (selectedSite?.kind === "vacant" && !next[buildingUse(selectedSite.dwellingType)]) setSelected(null);
   };
 
   useEffect(() => {
@@ -271,22 +434,43 @@ export default function HousingMap() {
 
     const isDesktopHover = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
+    /**
+     * What's under a pointer position, most specific first. The two point
+     * layers are queried ahead of the TIF fill deliberately rather than
+     * leaning on MapLibre's result ordering: a district polygon covers many
+     * city blocks, so whenever a dot and a district are both under the
+     * cursor the dot is the thing being aimed at, and that has to be true
+     * no matter what order the renderer happens to hand results back in.
+     *
+     * A layer switched off is `visibility: "none"` and never appears in
+     * queryRenderedFeatures results at all, so no filtering by active state
+     * is needed here.
+     */
+    const queryAt = (point: maplibregl.Point): Feature[] => {
+      const query = (ids: string[]) => {
+        const present = ids.filter((id) => map.getLayer(id));
+        return present.length === 0 ? [] : (map.queryRenderedFeatures(point, { layers: present }) as unknown as Feature[]);
+      };
+      const points = query([VACANT_CIRCLE, RELIEF_CIRCLE]);
+      return points.length > 0 ? points : query([TIF_FILL]);
+    };
+
     map.on("error", (e) => {
       console.error("[MapLibre ERROR]", e.error?.message ?? e);
     });
 
-    const handleHoverMove = (e: maplibregl.MapLayerMouseEvent) => {
+    // One unscoped hover handler rather than one per layer. With all three
+    // layers co-visible a pointer over a vacant building that sits inside a
+    // TIF district is inside two layers at once, and per-layer handlers
+    // would both fire — leaving whichever registered last to win, which is
+    // an arbitrary answer. Querying once returns features in render order,
+    // topmost first, so the small thing drawn on top of the big polygon is
+    // the thing the reader is actually pointing at.
+    const handleHoverMove = (e: maplibregl.MapMouseEvent) => {
       if (!isDesktopHover || selectedRef.current?.pinned) return;
-      map.getCanvas().style.cursor = "pointer";
-      const feature = e.features?.[0];
-      if (!feature) return;
-      setSelected({ properties: normalize(feature.properties), pinned: false });
-    };
-    const handleHoverLeave = () => {
-      if (!isDesktopHover) return;
-      map.getCanvas().style.cursor = "";
-      if (selectedRef.current?.pinned) return;
-      setSelected(null);
+      const hit = queryAt(e.point)[0];
+      map.getCanvas().style.cursor = hit ? "pointer" : "";
+      setSelected(hit ? { properties: normalize(hit.properties as Record<string, unknown>), pinned: false } : null);
     };
 
     map.on("load", async () => {
@@ -322,14 +506,15 @@ export default function HousingMap() {
         id: TIF_FILL,
         type: "fill",
         source: TIF_SOURCE,
-        layout: { visibility: "none" },
-        paint: { "fill-color": TIF_COLOR_EXPRESSION, "fill-opacity": 0.45 },
+        // Lighter than a solo layer would want: these polygons now sit under
+        // up to 900 points, and at 0.45 the fill drags every dot on top of
+        // it toward violet. The outline carries the district's shape instead.
+        paint: { "fill-color": TIF_COLOR_EXPRESSION, "fill-opacity": 0.25 },
       });
       map.addLayer({
         id: TIF_OUTLINE,
         type: "line",
         source: TIF_SOURCE,
-        layout: { visibility: "none" },
         paint: { "line-color": TIF_COLOR_EXPRESSION, "line-width": 1.5 },
       });
       map.addLayer({
@@ -343,7 +528,6 @@ export default function HousingMap() {
           // Districts are small and tightly packed downtown; without this
           // the labels collide into an unreadable mat at metro zoom.
           "text-max-width": 8,
-          visibility: "none",
         },
         // minzoom rather than letting MapLibre's collision detection thin
         // them out: at zoom 10 it keeps a near-random handful, which reads
@@ -369,7 +553,6 @@ export default function HousingMap() {
         id: RELIEF_CIRCLE,
         type: "circle",
         source: RELIEF_SOURCE,
-        layout: { visibility: "none" },
         paint: {
           "circle-color": LAYER_COLOR.relief,
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 4, 13, 7, 16, 12],
@@ -379,47 +562,48 @@ export default function HousingMap() {
         },
       });
 
-      // Registered after the layers exist, not at effect setup: a
-      // layer-scoped map.on() is itself a layer query and throws the same
-      // "layer does not exist" error if the pointer moves over the canvas
-      // before the layer has been added.
-      for (const id of [VACANT_CIRCLE, TIF_FILL, RELIEF_CIRCLE]) {
-        map.on("mousemove", id, handleHoverMove);
-        map.on("mouseleave", id, handleHoverLeave);
-      }
-
       boundsRef.current = {
         vacant: boundsOf(vacant),
         tif: boundsOf(tif),
         relief: boundsOf(relief),
       };
 
-      // Mode can have changed via a click while these fetches were in
-      // flight — setMode ran, but applyMode's getLayer guards no-opped
+      // A checkbox can have been clicked while these fetches were in flight
+      // — setActive ran, but applyVisibility's getLayer guards no-opped
       // because the layers didn't exist yet. Re-apply what's current rather
       // than trusting each layer's just-added default visibility.
-      applyMode(modeRef.current);
+      applyVisibility();
       applyFilters();
 
-      const initial = boundsRef.current[modeRef.current];
-      if (initial && !initial.isEmpty()) map.fitBounds(initial, { padding: 40, duration: 0 });
+      const initial = activeBounds();
+      if (initial) map.fitBounds(initial, { padding: fitPadding(), duration: 0 });
     });
 
-    // One unscoped click handler rather than one per layer, so a click that
-    // hits nothing can be told apart from one that hits a feature — that's
-    // what makes "tap away to dismiss" work instead of doing nothing.
+    // Both handlers are unscoped and registered here rather than inside the
+    // 'load' callback: queryAt guards every id with getLayer, so a pointer
+    // crossing the canvas before the data arrives is a no-op instead of a
+    // "layer does not exist" throw.
+    map.on("mousemove", handleHoverMove);
+    map.on("mouseout", () => {
+      if (!isDesktopHover) return;
+      map.getCanvas().style.cursor = "";
+      if (!selectedRef.current?.pinned) setSelected(null);
+    });
+
+    // A click that hits nothing has to be told apart from one that hits a
+    // feature — that's what makes "tap away to dismiss" work instead of
+    // doing nothing.
     map.on("click", (e: maplibregl.MapMouseEvent) => {
-      const queryable = [VACANT_CIRCLE, TIF_FILL, RELIEF_CIRCLE].filter((id) => map.getLayer(id));
-      if (queryable.length === 0) return;
-      // A hidden (visibility: "none") layer never appears in
-      // queryRenderedFeatures results, so querying all three is safe even
-      // though only one mode is ever on screen.
-      const hit = map.queryRenderedFeatures(e.point, { layers: queryable })[0] as Feature | undefined;
+      const hit = queryAt(e.point)[0];
       if (!hit) {
         if (selectedRef.current?.pinned) setSelected(null);
         return;
       }
       setSelected({ properties: normalize(hit.properties as Record<string, unknown>), pinned: true });
+      // On a phone the filter panel and the detail sheet both want the
+      // screen. Tapping a feature is a clear statement about which one the
+      // reader wants, so the panel folds away rather than being covered.
+      setPanelOpen(false);
     });
 
     const handleResize = () => map.resize();
@@ -440,7 +624,11 @@ export default function HousingMap() {
     <div className="relative w-full h-dvh overflow-hidden">
       <div ref={containerRef} className="absolute inset-0 w-full h-full" />
 
-      <div className="absolute left-3 top-3 z-20 flex flex-col gap-2 font-sans max-w-[min(20rem,calc(100vw-1.5rem))]">
+      {/* Left column. `max-h` + scroll rather than a fixed height: with three
+          layers expanded the controls are taller than a laptop viewport, and
+          a panel that runs off the bottom of the screen hides the citation
+          line at the end of the last layer. */}
+      <div className="pointer-events-none absolute left-3 top-3 z-20 flex max-h-[calc(100dvh-1.5rem)] w-[min(20rem,calc(100vw-1.5rem))] flex-col gap-2 overflow-y-auto overscroll-contain font-sans *:pointer-events-auto *:shrink-0">
         <div className="rounded-lg bg-white/95 backdrop-blur-sm border border-neutral-200 shadow-lg px-3 py-2">
           <div className="flex items-baseline justify-between gap-2">
             <h1 className="text-sm font-semibold text-neutral-900">MN Housing for All</h1>
@@ -449,123 +637,221 @@ export default function HousingMap() {
             </Link>
           </div>
           {tally && (
-            <p className="mt-1 text-xs text-neutral-600 leading-snug">
-              {mode === "vacant" && (
-                <>
+            // One line per layer that's switched on, rather than one line
+            // about whichever layer is selected. With the layers stacked the
+            // headline is the stack: empty houses, the subsidy that was
+            // supposed to fill them, and where people go instead.
+            <div className="mt-1 space-y-0.5 text-xs text-neutral-600 leading-snug">
+              {active.vacant && (
+                <p>
                   <strong className="text-amber-800">{tally.vacantTotal.toLocaleString("en-US")}</strong> buildings
-                  registered vacant — {tally.vacantByCity.Minneapolis} in Minneapolis,{" "}
-                  {tally.vacantByCity["St. Paul"]} in Saint Paul.
-                </>
+                  registered vacant — {tally.vacantByUse.home} homes, {tally.vacantByUse.business} businesses,{" "}
+                  {tally.vacantByUse.mixed} mixed-use, and {tally.vacantByUse.unrecorded} Minneapolis records with no
+                  building type.
+                </p>
               )}
-              {mode === "tif" && (
-                <>
+              {active.tif && (
+                <p>
                   <strong className="text-violet-700">{formatDollars(tally.housingTifDollars)}</strong> in tax increment
                   received across {tally.housingTifCount} housing districts.
-                </>
+                </p>
               )}
-              {mode === "relief" && (
-                <>
-                  <strong className="text-teal-700">{tally.reliefFreeCount}</strong> free indoor locations across
-                  Hennepin County.
-                </>
+              {active.relief && (
+                <p>
+                  <strong className="text-teal-700">{tally.reliefFreeCount}</strong> cooling sites across Hennepin
+                  County you can enter for free.
+                </p>
               )}
-            </p>
+              {!activeCount && <p>No layers shown. Switch one on below.</p>}
+            </div>
           )}
+
+          {/* Phone-only handle for the panel below. Hidden from `md` up,
+              where that panel is always on screen and a control that can't
+              change anything would just be a dead button. */}
+          <button
+            type="button"
+            onClick={() => setPanelOpen((open) => !open)}
+            aria-expanded={panelOpen}
+            aria-controls="layer-panel"
+            className="mt-2 flex w-full items-center justify-between rounded-md border border-neutral-200 px-2.5 py-2 text-sm font-medium text-neutral-700 active:bg-neutral-100 md:hidden"
+          >
+            <span>
+              Layers &amp; filters
+              <span className="ml-1.5 font-normal text-neutral-500">
+                {activeCount} of {LAYERS.length} on
+              </span>
+            </span>
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className={`shrink-0 transition-transform ${panelOpen ? "rotate-180" : ""}`}
+              aria-hidden="true"
+            >
+              <path d="M5 8l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         </div>
 
         <div
+          id="layer-panel"
           role="group"
-          aria-label="Choose map layer"
-          className="flex rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg p-1 text-sm"
+          aria-label="Map layers"
+          className={`${panelOpen ? "block" : "hidden"} rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg divide-y divide-neutral-200 text-sm text-neutral-700 md:block`}
         >
-          {MODES.map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => switchMode(m)}
-              aria-pressed={mode === m}
-              className={`flex-1 px-3 py-1.5 rounded-md font-medium transition-colors ${
-                mode === m ? "text-white" : "text-neutral-600 hover:bg-neutral-100"
-              }`}
-              style={mode === m ? { backgroundColor: LAYER_COLOR[m] } : undefined}
-            >
-              {LAYER_LABEL[m]}
-            </button>
+          {LAYERS.map((kind) => (
+            <div key={kind}>
+              <div className="flex items-center gap-2 px-3 py-2.5 sm:py-2">
+                <label className="flex flex-1 min-w-0 items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={active[kind]}
+                    onChange={() => toggleLayer(kind)}
+                    className="cursor-pointer"
+                  />
+                  <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: LAYER_COLOR[kind] }} />
+                  <span className="font-medium text-neutral-900">{LAYER_LABEL[kind]}</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => zoomToLayer(kind)}
+                  disabled={!active[kind]}
+                  className="shrink-0 rounded-md px-2.5 py-2 text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900 active:bg-neutral-200 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-neutral-500 md:py-1"
+                >
+                  Zoom to
+                </button>
+              </div>
+
+              {/* Blurb, filters, and legend live under the layer they belong
+                  to, and disappear with it. A "Housing districts only"
+                  checkbox floating in the panel while its layer is off is a
+                  control that visibly does nothing. */}
+              {active[kind] && (
+                <div className="border-t border-neutral-100 px-3 py-2 space-y-2">
+                  <p className="text-xs text-neutral-600 leading-snug">{LAYER_BLURB[kind]}</p>
+
+                  {kind === "vacant" && (
+                    <>
+                      <div className="flex gap-4">
+                        {CITIES.map((city) => (
+                          <label key={city} className="flex cursor-pointer select-none items-center gap-2 py-1 text-xs md:py-0">
+                            <input
+                              type="checkbox"
+                              checked={visibleCities[city]}
+                              onChange={() => toggleCity(city)}
+                              className="cursor-pointer"
+                            />
+                            {city}
+                          </label>
+                        ))}
+                      </div>
+
+                      {/* "Empty" on its own doesn't say empty *what*. Saint
+                          Paul publishes a dwelling type, so the split
+                          between houses, storefronts and mixed-use blocks is
+                          in the data and belongs on screen — including the
+                          bucket Minneapolis leaves blank, which is a third
+                          of the layer and shouldn't look like a home. */}
+                      <div>
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+                          What kind of building
+                        </p>
+                        <div className="mt-1 space-y-0.5">
+                          {BUILDING_USES.map((use) => (
+                            <label key={use} className="flex cursor-pointer select-none items-center gap-2 py-1 text-xs md:py-0">
+                              <input
+                                type="checkbox"
+                                checked={visibleUses[use]}
+                                onChange={() => toggleUse(use)}
+                                className="cursor-pointer"
+                              />
+                              <span className="flex-1">{BUILDING_USE_LABEL[use]}</span>
+                              {tally && <span className="tabular-nums text-neutral-500">{tally.vacantByUse[use]}</span>}
+                            </label>
+                          ))}
+                        </div>
+                        <p className="mt-1 text-[11px] leading-snug text-neutral-500">
+                          Saint Paul records what each building is; Minneapolis&rsquo; register carries no building-type
+                          field, so its 311 buildings are unclassified rather than assumed to be homes.
+                        </p>
+                      </div>
+
+                      <div className="space-y-1">
+                        {Object.entries(VACANT_CATEGORY_COLOR).map(([category, color]) => (
+                          <div key={category} className="flex items-center gap-2 text-xs text-neutral-600">
+                            <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                            Saint Paul category {category}
+                          </div>
+                        ))}
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          <span
+                            className="h-2.5 w-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: VACANT_UNCATEGORIZED_COLOR }}
+                          />
+                          Minneapolis (uncategorized)
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {kind === "tif" && (
+                    <>
+                      <label className="flex cursor-pointer select-none items-center gap-2 py-1 text-xs md:py-0">
+                        <input
+                          type="checkbox"
+                          checked={housingOnly}
+                          onChange={() => setBooleanFilter(setHousingOnly, housingOnlyRef, !housingOnly)}
+                          className="cursor-pointer"
+                        />
+                        Housing districts only
+                      </label>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_HOUSING_COLOR }} />
+                          Housing district
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_OTHER_COLOR }} />
+                          Other or unstated type
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {kind === "relief" && (
+                    <label className="flex cursor-pointer select-none items-center gap-2 py-1 text-xs md:py-0">
+                      <input
+                        type="checkbox"
+                        checked={freeOnly}
+                        onChange={() => setBooleanFilter(setFreeOnly, freeOnlyRef, !freeOnly)}
+                        className="cursor-pointer"
+                      />
+                      Free to enter only
+                    </label>
+                  )}
+
+                  <LayerCitation kind={kind} />
+                </div>
+              )}
+            </div>
           ))}
         </div>
-
-        <div className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg px-3 py-2 text-xs text-neutral-600 leading-snug">
-          {LAYER_BLURB[mode]}
-        </div>
-
-        {mode === "vacant" && (
-          <div
-            role="group"
-            aria-label="Filter by city"
-            className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg divide-y divide-neutral-100 text-sm text-neutral-700"
-          >
-            {CITIES.map((city) => (
-              <label key={city} className="flex items-center gap-2 px-3 py-2.5 sm:py-2 cursor-pointer select-none">
-                <input type="checkbox" checked={visibleCities[city]} onChange={() => toggleCity(city)} className="cursor-pointer" />
-                {city}
-              </label>
-            ))}
-            <div className="px-3 py-2 space-y-1">
-              {Object.entries(VACANT_CATEGORY_COLOR).map(([category, color]) => (
-                <div key={category} className="flex items-center gap-2 text-xs text-neutral-600">
-                  <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                  Saint Paul category {category}
-                </div>
-              ))}
-              <div className="flex items-center gap-2 text-xs text-neutral-600">
-                <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: VACANT_UNCATEGORIZED_COLOR }} />
-                Minneapolis (uncategorized)
-              </div>
-            </div>
-          </div>
-        )}
-
-        {mode === "tif" && (
-          <div className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg text-sm text-neutral-700">
-            <label className="flex items-center gap-2 px-3 py-2.5 sm:py-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={housingOnly}
-                onChange={() => setBooleanFilter(setHousingOnly, housingOnlyRef, !housingOnly)}
-                className="cursor-pointer"
-              />
-              Housing districts only
-            </label>
-            <div className="border-t border-neutral-100 px-3 py-2 space-y-1">
-              <div className="flex items-center gap-2 text-xs text-neutral-600">
-                <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_HOUSING_COLOR }} />
-                Housing district
-              </div>
-              <div className="flex items-center gap-2 text-xs text-neutral-600">
-                <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_OTHER_COLOR }} />
-                Other or unstated type
-              </div>
-            </div>
-          </div>
-        )}
-
-        {mode === "relief" && (
-          <div className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg text-sm text-neutral-700">
-            <label className="flex items-center gap-2 px-3 py-2.5 sm:py-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={freeOnly}
-                onChange={() => setBooleanFilter(setFreeOnly, freeOnlyRef, !freeOnly)}
-                className="cursor-pointer"
-              />
-              Free to enter only
-            </label>
-          </div>
-        )}
       </div>
 
       {selected && (
-        <div className="absolute inset-x-0 bottom-0 z-10 flex justify-center pointer-events-none pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:justify-start sm:left-4 sm:bottom-4 sm:pb-0">
+        // Top-right from `md` up, not bottom-left: the filter panel owns the
+        // left column at every height, so a detail card anchored there —
+        // which is where this used to sit — was drawn underneath it and the
+        // reader lost both. The right side also keeps clear of MapLibre's
+        // zoom buttons and attribution, which live bottom-right.
+        //
+        // Below `md` it's a bottom sheet, the one place a card can go on a
+        // phone without covering the feature the reader just tapped.
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex justify-center pb-[env(safe-area-inset-bottom)] md:inset-x-auto md:bottom-auto md:right-3 md:top-3 md:justify-end md:pb-0">
           <SiteModal site={selected.properties} pinned={selected.pinned} onClose={() => setSelected(null)} />
         </div>
       )}

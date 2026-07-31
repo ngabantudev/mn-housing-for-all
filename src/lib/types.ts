@@ -8,6 +8,16 @@ export type LayerKind = "vacant" | "tif" | "relief";
 /** Which city's open-data portal a feature came from. */
 export type City = "Minneapolis" | "St. Paul";
 
+/**
+ * What an empty building was being used for before it emptied out —
+ * "an empty duplex" and "an empty storefront" are different facts about a
+ * block, and the layer is unreadable if it flattens them into "empty."
+ * Saint Paul publishes a dwelling type this is derived from; Minneapolis
+ * publishes none, hence the fourth value. The mapping from the cities' own
+ * strings lives in housingTheme.ts.
+ */
+export type BuildingUse = "home" | "business" | "mixed" | "unrecorded";
+
 export interface VacantProperties {
   kind: "vacant";
   city: City;
@@ -68,12 +78,18 @@ export interface ReliefProperties {
   city: string;
   name: string;
   address: string;
-  // "Library", "Park Facility", "Government Building", ... — Hennepin's own
-  // categorization of what kind of place this is.
+  // "Library", "Rec Com Cntr", "Govt Bldg", ... — Hennepin's own
+  // categorization, stored verbatim so it matches the county's file. The
+  // abbreviations are expanded for display by RELIEF_TYPE_LABEL rather than
+  // rewritten here.
   type: string;
   hours: string | null;
   phone: string | null;
   website: string | null;
+  // The county's free-text note on the site: what's actually in the
+  // building, what a non-swimmer pays, and — on a handful of rows whose
+  // status still reads Active — that it's closed for the season.
+  notes: string | null;
   // Whether getting in the door costs money. The whole point of this layer
   // for an unhoused resident is somewhere to be that doesn't, so the map
   // defaults to showing only the free ones.
@@ -90,6 +106,12 @@ export type FeatureProperties = VacantProperties | TifProperties | ReliefPropert
 export interface Tally {
   vacantTotal: number;
   vacantByCity: Record<City, number>;
+  // How many of the registered vacant buildings are homes, businesses, or
+  // mixed-use — the answer to "empty what, exactly?" Keyed by the coarse
+  // grouping in housingTheme.ts rather than by Saint Paul's raw dwelling
+  // type, because Minneapolis publishes no type at all and the fourth
+  // bucket ("not recorded") has to be countable and visible.
+  vacantByUse: Record<BuildingUse, number>;
   // Sum of `incrementReceived` across Housing-type districts only.
   housingTifDollars: number;
   housingTifCount: number;
