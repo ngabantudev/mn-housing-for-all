@@ -52,6 +52,24 @@ function SourceCard({ source }: { source: Source }) {
 
       <p className="mt-2.5 text-sm leading-relaxed text-neutral-700">{source.description}</p>
 
+      {source.credit && (
+        // Above the caveat rather than in the footnotes: whoever brought a
+        // source to this project is part of where the data came from, not a
+        // postscript to it.
+        <p className="mt-2.5 rounded-lg bg-neutral-50 px-3 py-2 text-sm leading-relaxed text-neutral-700">
+          <span className="font-medium">Brought to this project by {source.credit.name}</span> of{" "}
+          <a
+            href={source.credit.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-neutral-300 underline-offset-2 hover:decoration-neutral-900"
+          >
+            {source.credit.org}
+          </a>
+          , who has been reading these districts far longer than this map has existed.
+        </p>
+      )}
+
       {source.caveat && (
         <p className="mt-2.5 border-l-2 border-amber-300 pl-3 text-sm leading-relaxed text-neutral-600">
           <span className="font-medium text-amber-800">Caveat: </span>

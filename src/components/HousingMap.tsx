@@ -210,6 +210,24 @@ function LayerCitation({ kind }: { kind: LayerKind }) {
           </Link>
         </>
       )}
+      {/* The person who brought the layer here, credited on the layer
+          itself. Someone had to know this data existed and that it was
+          worth mapping; that doesn't show up anywhere in the file. */}
+      {feeds.map((source) =>
+        source.credit ? (
+          <span key={`${source.id}-credit`}>
+            {" · via "}
+            <a
+              href={source.credit.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-neutral-900"
+            >
+              {source.credit.org}
+            </a>
+          </span>
+        ) : null,
+      )}
     </p>
   );
 }

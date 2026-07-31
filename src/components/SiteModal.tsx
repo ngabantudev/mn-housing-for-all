@@ -205,6 +205,22 @@ function SourceFooter({ site }: { site: FeatureProperties }) {
       <Link href={`/sources#${feeds[0].id}`} className="underline underline-offset-2 hover:text-neutral-900">
         what this data does and doesn&rsquo;t contain
       </Link>
+      {feeds.map((source) =>
+        source.credit ? (
+          <span key={`${source.id}-credit`} className="mt-1 block">
+            Brought to this project by {source.credit.name} of{" "}
+            <a
+              href={source.credit.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-neutral-900"
+            >
+              {source.credit.org}
+            </a>
+            .
+          </span>
+        ) : null,
+      )}
     </p>
   );
 }
@@ -221,7 +237,7 @@ export default function SiteModal({
   const accent = LAYER_COLOR[site.kind];
   return (
     <div
-      className="pointer-events-auto w-full sm:w-[380px] max-h-[55dvh] sm:max-h-[70dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-neutral-200 font-sans"
+      className="pointer-events-auto w-full sm:w-95 max-h-[55dvh] sm:max-h-[70dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-neutral-200 font-sans"
       style={{ borderTopColor: accent, borderTopWidth: 4 }}
     >
       <div className="p-4">
@@ -233,7 +249,7 @@ export default function SiteModal({
             >
               {KIND_LABEL[site.kind]}
             </span>
-            <h2 className="mt-1.5 text-base font-semibold text-neutral-900 leading-snug break-words">
+            <h2 className="mt-1.5 text-base font-semibold text-neutral-900 leading-snug wrap-break-word">
               {siteTitle(site)}
             </h2>
           </div>

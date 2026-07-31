@@ -83,6 +83,21 @@ export interface Source {
   short?: string;
   /** Known gaps, staleness, or caveats — from the publisher where they state one. */
   caveat?: string;
+  /**
+   * Who pointed this project at the source. Separate from `publisher`, and
+   * deliberately so: the city published the data, but somebody had to know
+   * it existed and that it was worth putting on a map. That work is
+   * invisible in the file itself, so it gets named here.
+   *
+   * No email address — this is a public page, and a contributor's inbox is
+   * theirs to hand out rather than this project's to publish. The
+   * organization link is the contact route.
+   */
+  credit?: {
+    name: string;
+    org: string;
+    url: string;
+  };
 }
 
 export const SOURCES: Source[] = [
@@ -131,6 +146,11 @@ export const SOURCES: Source[] = [
       "All TIF districts established by the Saint Paul Housing and Redevelopment Authority and the Saint Paul Port Authority, plus the project areas they sit within and the parcels participating in each. Each district carries its number, type, certification date, required decertification date, and the tax increment received and expended as filed with the State Auditor. 64 districts at last fetch, 29 of them typed 'Housing'.",
     caveat:
       "The city's own note: records active or certified only before the mid-2010s may not be reflected. Eleven districts carry no district type in the published table, so the Housing count is a floor, not an exact figure.",
+    credit: {
+      name: "Robert Hindel",
+      org: "Fairtax St Paul",
+      url: "https://www.fairtaxstpaul.org/",
+    },
   },
   {
     id: "hennepin-cooling",
