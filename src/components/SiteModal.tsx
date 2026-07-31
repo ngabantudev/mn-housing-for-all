@@ -237,7 +237,16 @@ export default function SiteModal({
   const accent = LAYER_COLOR[site.kind];
   return (
     <div
-      className="pointer-events-auto w-full sm:w-95 max-h-[55dvh] sm:max-h-[70dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-neutral-200 font-sans"
+      // Handle for layout checks: whether this card overlaps the filter
+      // panel is a geometry question, and the only honest way to answer it
+      // is to measure both rects in a real viewport.
+      data-site-modal=""
+      // Breakpoint is `md`, not `sm`: at 640px a 20rem filter panel and a
+      // 22rem detail card don't both fit across the viewport, so the
+      // side-by-side layout has to wait for 768px. Height is capped in dvh
+      // so a long TIF record scrolls inside the card rather than running off
+      // the bottom of the screen.
+      className="pointer-events-auto w-full max-h-[55dvh] overflow-y-auto rounded-t-2xl border border-neutral-200 bg-white font-sans shadow-2xl md:max-h-[calc(100dvh-1.5rem)] md:w-88 md:rounded-2xl lg:w-95"
       style={{ borderTopColor: accent, borderTopWidth: 4 }}
     >
       <div className="p-4">
