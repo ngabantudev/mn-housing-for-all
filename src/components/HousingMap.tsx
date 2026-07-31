@@ -25,7 +25,7 @@ const LIBERTY_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const TWIN_CITIES_CENTER: [number, number] = [-93.185, 44.955];
 const DEFAULT_ZOOM = 10.4;
 
-const MODES: LayerKind[] = ["vacant", "tif", "relief"];
+const LAYERS: LayerKind[] = ["vacant", "tif", "relief"];
 const CITIES: City[] = ["Minneapolis", "St. Paul"];
 
 const VACANT_SOURCE = "vacant-source";
@@ -37,10 +37,12 @@ const TIF_LABEL = "tif-label";
 const RELIEF_SOURCE = "relief-source";
 const RELIEF_CIRCLE = "relief-circle";
 
-// Which layers belong to which mode. Only one mode is on screen at a time:
-// 695 building points under 64 translucent polygons is unreadable, and the
-// three layers answer three different questions anyway.
-const MODE_LAYERS: Record<LayerKind, string[]> = {
+// The MapLibre layer ids each toggle owns. Any combination of the three can
+// be on screen at once, which is the point: "vacant houses inside a housing
+// TIF district" is a question you can only ask by looking at both at the
+// same time. Draw order keeps that readable — the TIF polygons are added
+// first and stay underneath, so points are never buried by a fill.
+const LAYER_IDS: Record<LayerKind, string[]> = {
   vacant: [VACANT_CIRCLE],
   tif: [TIF_FILL, TIF_OUTLINE, TIF_LABEL],
   relief: [RELIEF_CIRCLE],
@@ -142,8 +144,11 @@ export default function HousingMap() {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const boundsRef = useRef<Partial<Record<LayerKind, maplibregl.LngLatBounds>>>({});
 
-  const [mode, setMode] = useState<LayerKind>("vacant");
-  const modeRef = useRef(mode);
+  // Every layer starts on. The map's whole argument is the three datasets
+  // read against each other, so the default view is all of them and the
+  // checkboxes are there to subtract, not to assemble.
+  const [active, setActive] = useState<Record<LayerKind, boolean>>({ vacant: true, tif: true, relief: true });
+  const activeRef = useRef(active);
   const [visibleCities, setVisibleCities] = useState<Record<City, boolean>>({ Minneapolis: true, "St. Paul": true });
   const visibleCitiesRef = useRef(visibleCities);
   const [housingOnly, setHousingOnly] = useState(false);
@@ -153,10 +158,11 @@ export default function HousingMap() {
   const [selected, setSelected] = useState<Selected | null>(null);
   const selectedRef = useRef<Selected | null>(null);
   const [tally, setTally] = useState<Tally | null>(null);
+  const activeCount = LAYERS.filter((kind) => active[kind]).length;
 
   useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
+    activeRef.current = active;
+  }, [active]);
   useEffect(() => {
     visibleCitiesRef.current = visibleCities;
   }, [visibleCities]);
@@ -170,11 +176,27 @@ export default function HousingMap() {
     selectedRef.current = selected;
   }, [selected]);
 
-  const zoomToDefault = (target: LayerKind = modeRef.current) => {
+  const zoomToLayer = (target: LayerKind) => {
     const map = mapRef.current;
     const bounds = boundsRef.current[target];
     if (!map || !bounds || bounds.isEmpty()) return;
     map.fitBounds(bounds, { padding: 40, duration: 600 });
+  };
+
+  /**
+   * The extent of everything currently switched on. With three layers
+   * co-visible there's no single "the" layer to frame on, and framing on
+   * one of them silently pushes the others off screen — which reads as
+   * "that layer has no data here" rather than "you're zoomed past it."
+   */
+  const activeBounds = (): maplibregl.LngLatBounds | null => {
+    const combined = new maplibregl.LngLatBounds();
+    for (const kind of LAYERS) {
+      const b = boundsRef.current[kind];
+      if (!activeRef.current[kind] || !b || b.isEmpty()) continue;
+      combined.extend(b);
+    }
+    return combined.isEmpty() ? null : combined;
   };
 
   // Every filter the UI can set, re-derived from current state and applied
@@ -224,23 +246,25 @@ export default function HousingMap() {
     setSelected(null);
   };
 
-  const applyMode = (next: LayerKind) => {
+  const applyVisibility = () => {
     const map = mapRef.current;
     if (!map) return;
-    for (const [groupMode, ids] of Object.entries(MODE_LAYERS) as [LayerKind, string[]][]) {
+    for (const [kind, ids] of Object.entries(LAYER_IDS) as [LayerKind, string[]][]) {
+      const visibility = activeRef.current[kind] ? "visible" : "none";
       for (const id of ids) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", groupMode === next ? "visible" : "none");
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
       }
     }
   };
 
-  const switchMode = (next: LayerKind) => {
-    if (next === modeRef.current) return;
-    modeRef.current = next;
-    setMode(next);
-    setSelected(null);
-    applyMode(next);
-    zoomToDefault(next);
+  const toggleLayer = (kind: LayerKind) => {
+    const next = { ...activeRef.current, [kind]: !activeRef.current[kind] };
+    activeRef.current = next;
+    setActive(next);
+    applyVisibility();
+    // A modal describing a feature on a layer that just went away is
+    // pointing at nothing on screen — close it rather than strand it.
+    if (!next[kind] && selectedRef.current?.properties.kind === kind) setSelected(null);
   };
 
   const toggleCity = (city: City) => {
@@ -271,22 +295,43 @@ export default function HousingMap() {
 
     const isDesktopHover = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
+    /**
+     * What's under a pointer position, most specific first. The two point
+     * layers are queried ahead of the TIF fill deliberately rather than
+     * leaning on MapLibre's result ordering: a district polygon covers many
+     * city blocks, so whenever a dot and a district are both under the
+     * cursor the dot is the thing being aimed at, and that has to be true
+     * no matter what order the renderer happens to hand results back in.
+     *
+     * A layer switched off is `visibility: "none"` and never appears in
+     * queryRenderedFeatures results at all, so no filtering by active state
+     * is needed here.
+     */
+    const queryAt = (point: maplibregl.Point): Feature[] => {
+      const query = (ids: string[]) => {
+        const present = ids.filter((id) => map.getLayer(id));
+        return present.length === 0 ? [] : (map.queryRenderedFeatures(point, { layers: present }) as unknown as Feature[]);
+      };
+      const points = query([VACANT_CIRCLE, RELIEF_CIRCLE]);
+      return points.length > 0 ? points : query([TIF_FILL]);
+    };
+
     map.on("error", (e) => {
       console.error("[MapLibre ERROR]", e.error?.message ?? e);
     });
 
-    const handleHoverMove = (e: maplibregl.MapLayerMouseEvent) => {
+    // One unscoped hover handler rather than one per layer. With all three
+    // layers co-visible a pointer over a vacant building that sits inside a
+    // TIF district is inside two layers at once, and per-layer handlers
+    // would both fire — leaving whichever registered last to win, which is
+    // an arbitrary answer. Querying once returns features in render order,
+    // topmost first, so the small thing drawn on top of the big polygon is
+    // the thing the reader is actually pointing at.
+    const handleHoverMove = (e: maplibregl.MapMouseEvent) => {
       if (!isDesktopHover || selectedRef.current?.pinned) return;
-      map.getCanvas().style.cursor = "pointer";
-      const feature = e.features?.[0];
-      if (!feature) return;
-      setSelected({ properties: normalize(feature.properties), pinned: false });
-    };
-    const handleHoverLeave = () => {
-      if (!isDesktopHover) return;
-      map.getCanvas().style.cursor = "";
-      if (selectedRef.current?.pinned) return;
-      setSelected(null);
+      const hit = queryAt(e.point)[0];
+      map.getCanvas().style.cursor = hit ? "pointer" : "";
+      setSelected(hit ? { properties: normalize(hit.properties as Record<string, unknown>), pinned: false } : null);
     };
 
     map.on("load", async () => {
@@ -322,14 +367,15 @@ export default function HousingMap() {
         id: TIF_FILL,
         type: "fill",
         source: TIF_SOURCE,
-        layout: { visibility: "none" },
-        paint: { "fill-color": TIF_COLOR_EXPRESSION, "fill-opacity": 0.45 },
+        // Lighter than a solo layer would want: these polygons now sit under
+        // up to 900 points, and at 0.45 the fill drags every dot on top of
+        // it toward violet. The outline carries the district's shape instead.
+        paint: { "fill-color": TIF_COLOR_EXPRESSION, "fill-opacity": 0.25 },
       });
       map.addLayer({
         id: TIF_OUTLINE,
         type: "line",
         source: TIF_SOURCE,
-        layout: { visibility: "none" },
         paint: { "line-color": TIF_COLOR_EXPRESSION, "line-width": 1.5 },
       });
       map.addLayer({
@@ -343,7 +389,6 @@ export default function HousingMap() {
           // Districts are small and tightly packed downtown; without this
           // the labels collide into an unreadable mat at metro zoom.
           "text-max-width": 8,
-          visibility: "none",
         },
         // minzoom rather than letting MapLibre's collision detection thin
         // them out: at zoom 10 it keeps a near-random handful, which reads
@@ -369,7 +414,6 @@ export default function HousingMap() {
         id: RELIEF_CIRCLE,
         type: "circle",
         source: RELIEF_SOURCE,
-        layout: { visibility: "none" },
         paint: {
           "circle-color": LAYER_COLOR.relief,
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 4, 13, 7, 16, 12],
@@ -379,42 +423,39 @@ export default function HousingMap() {
         },
       });
 
-      // Registered after the layers exist, not at effect setup: a
-      // layer-scoped map.on() is itself a layer query and throws the same
-      // "layer does not exist" error if the pointer moves over the canvas
-      // before the layer has been added.
-      for (const id of [VACANT_CIRCLE, TIF_FILL, RELIEF_CIRCLE]) {
-        map.on("mousemove", id, handleHoverMove);
-        map.on("mouseleave", id, handleHoverLeave);
-      }
-
       boundsRef.current = {
         vacant: boundsOf(vacant),
         tif: boundsOf(tif),
         relief: boundsOf(relief),
       };
 
-      // Mode can have changed via a click while these fetches were in
-      // flight — setMode ran, but applyMode's getLayer guards no-opped
+      // A checkbox can have been clicked while these fetches were in flight
+      // — setActive ran, but applyVisibility's getLayer guards no-opped
       // because the layers didn't exist yet. Re-apply what's current rather
       // than trusting each layer's just-added default visibility.
-      applyMode(modeRef.current);
+      applyVisibility();
       applyFilters();
 
-      const initial = boundsRef.current[modeRef.current];
-      if (initial && !initial.isEmpty()) map.fitBounds(initial, { padding: 40, duration: 0 });
+      const initial = activeBounds();
+      if (initial) map.fitBounds(initial, { padding: 40, duration: 0 });
     });
 
-    // One unscoped click handler rather than one per layer, so a click that
-    // hits nothing can be told apart from one that hits a feature — that's
-    // what makes "tap away to dismiss" work instead of doing nothing.
+    // Both handlers are unscoped and registered here rather than inside the
+    // 'load' callback: queryAt guards every id with getLayer, so a pointer
+    // crossing the canvas before the data arrives is a no-op instead of a
+    // "layer does not exist" throw.
+    map.on("mousemove", handleHoverMove);
+    map.on("mouseout", () => {
+      if (!isDesktopHover) return;
+      map.getCanvas().style.cursor = "";
+      if (!selectedRef.current?.pinned) setSelected(null);
+    });
+
+    // A click that hits nothing has to be told apart from one that hits a
+    // feature — that's what makes "tap away to dismiss" work instead of
+    // doing nothing.
     map.on("click", (e: maplibregl.MapMouseEvent) => {
-      const queryable = [VACANT_CIRCLE, TIF_FILL, RELIEF_CIRCLE].filter((id) => map.getLayer(id));
-      if (queryable.length === 0) return;
-      // A hidden (visibility: "none") layer never appears in
-      // queryRenderedFeatures results, so querying all three is safe even
-      // though only one mode is ever on screen.
-      const hit = map.queryRenderedFeatures(e.point, { layers: queryable })[0] as Feature | undefined;
+      const hit = queryAt(e.point)[0];
       if (!hit) {
         if (selectedRef.current?.pinned) setSelected(null);
         return;
@@ -440,7 +481,7 @@ export default function HousingMap() {
     <div className="relative w-full h-dvh overflow-hidden">
       <div ref={containerRef} className="absolute inset-0 w-full h-full" />
 
-      <div className="absolute left-3 top-3 z-20 flex flex-col gap-2 font-sans max-w-[min(20rem,calc(100vw-1.5rem))]">
+      <div className="absolute left-3 top-3 bottom-3 z-20 flex flex-col gap-2 font-sans w-[min(20rem,calc(100vw-1.5rem))] overflow-y-auto overscroll-contain pointer-events-none *:pointer-events-auto *:shrink-0">
         <div className="rounded-lg bg-white/95 backdrop-blur-sm border border-neutral-200 shadow-lg px-3 py-2">
           <div className="flex items-baseline justify-between gap-2">
             <h1 className="text-sm font-semibold text-neutral-900">MN Housing for All</h1>
@@ -449,119 +490,144 @@ export default function HousingMap() {
             </Link>
           </div>
           {tally && (
-            <p className="mt-1 text-xs text-neutral-600 leading-snug">
-              {mode === "vacant" && (
-                <>
+            // One line per layer that's switched on, rather than one line
+            // about whichever layer is selected. With the layers stacked the
+            // headline is the stack: empty houses, the subsidy that was
+            // supposed to fill them, and where people go instead.
+            <div className="mt-1 space-y-0.5 text-xs text-neutral-600 leading-snug">
+              {active.vacant && (
+                <p>
                   <strong className="text-amber-800">{tally.vacantTotal.toLocaleString("en-US")}</strong> buildings
-                  registered vacant — {tally.vacantByCity.Minneapolis} in Minneapolis,{" "}
-                  {tally.vacantByCity["St. Paul"]} in Saint Paul.
-                </>
+                  registered vacant — {tally.vacantByCity.Minneapolis} in Minneapolis, {tally.vacantByCity["St. Paul"]}{" "}
+                  in Saint Paul.
+                </p>
               )}
-              {mode === "tif" && (
-                <>
+              {active.tif && (
+                <p>
                   <strong className="text-violet-700">{formatDollars(tally.housingTifDollars)}</strong> in tax increment
                   received across {tally.housingTifCount} housing districts.
-                </>
+                </p>
               )}
-              {mode === "relief" && (
-                <>
+              {active.relief && (
+                <p>
                   <strong className="text-teal-700">{tally.reliefFreeCount}</strong> free indoor locations across
                   Hennepin County.
-                </>
+                </p>
               )}
-            </p>
+              {!activeCount && <p>No layers shown. Switch one on below.</p>}
+            </div>
           )}
         </div>
 
         <div
           role="group"
-          aria-label="Choose map layer"
-          className="flex rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg p-1 text-sm"
+          aria-label="Map layers"
+          className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg divide-y divide-neutral-200 text-sm text-neutral-700"
         >
-          {MODES.map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => switchMode(m)}
-              aria-pressed={mode === m}
-              className={`flex-1 px-3 py-1.5 rounded-md font-medium transition-colors ${
-                mode === m ? "text-white" : "text-neutral-600 hover:bg-neutral-100"
-              }`}
-              style={mode === m ? { backgroundColor: LAYER_COLOR[m] } : undefined}
-            >
-              {LAYER_LABEL[m]}
-            </button>
+          {LAYERS.map((kind) => (
+            <div key={kind}>
+              <div className="flex items-center gap-2 px-3 py-2.5 sm:py-2">
+                <label className="flex flex-1 min-w-0 items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={active[kind]}
+                    onChange={() => toggleLayer(kind)}
+                    className="cursor-pointer"
+                  />
+                  <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: LAYER_COLOR[kind] }} />
+                  <span className="font-medium text-neutral-900">{LAYER_LABEL[kind]}</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => zoomToLayer(kind)}
+                  disabled={!active[kind]}
+                  className="shrink-0 rounded-md px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-neutral-500"
+                >
+                  Zoom to
+                </button>
+              </div>
+
+              {/* Blurb, filters, and legend live under the layer they belong
+                  to, and disappear with it. A "Housing districts only"
+                  checkbox floating in the panel while its layer is off is a
+                  control that visibly does nothing. */}
+              {active[kind] && (
+                <div className="border-t border-neutral-100 px-3 py-2 space-y-2">
+                  <p className="text-xs text-neutral-600 leading-snug">{LAYER_BLURB[kind]}</p>
+
+                  {kind === "vacant" && (
+                    <>
+                      <div className="flex gap-4">
+                        {CITIES.map((city) => (
+                          <label key={city} className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={visibleCities[city]}
+                              onChange={() => toggleCity(city)}
+                              className="cursor-pointer"
+                            />
+                            {city}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="space-y-1">
+                        {Object.entries(VACANT_CATEGORY_COLOR).map(([category, color]) => (
+                          <div key={category} className="flex items-center gap-2 text-xs text-neutral-600">
+                            <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                            Saint Paul category {category}
+                          </div>
+                        ))}
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          <span
+                            className="h-2.5 w-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: VACANT_UNCATEGORIZED_COLOR }}
+                          />
+                          Minneapolis (uncategorized)
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {kind === "tif" && (
+                    <>
+                      <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={housingOnly}
+                          onChange={() => setBooleanFilter(setHousingOnly, housingOnlyRef, !housingOnly)}
+                          className="cursor-pointer"
+                        />
+                        Housing districts only
+                      </label>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_HOUSING_COLOR }} />
+                          Housing district
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_OTHER_COLOR }} />
+                          Other or unstated type
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {kind === "relief" && (
+                    <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={freeOnly}
+                        onChange={() => setBooleanFilter(setFreeOnly, freeOnlyRef, !freeOnly)}
+                        className="cursor-pointer"
+                      />
+                      Free to enter only
+                    </label>
+                  )}
+                </div>
+              )}
+            </div>
           ))}
         </div>
-
-        <div className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg px-3 py-2 text-xs text-neutral-600 leading-snug">
-          {LAYER_BLURB[mode]}
-        </div>
-
-        {mode === "vacant" && (
-          <div
-            role="group"
-            aria-label="Filter by city"
-            className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg divide-y divide-neutral-100 text-sm text-neutral-700"
-          >
-            {CITIES.map((city) => (
-              <label key={city} className="flex items-center gap-2 px-3 py-2.5 sm:py-2 cursor-pointer select-none">
-                <input type="checkbox" checked={visibleCities[city]} onChange={() => toggleCity(city)} className="cursor-pointer" />
-                {city}
-              </label>
-            ))}
-            <div className="px-3 py-2 space-y-1">
-              {Object.entries(VACANT_CATEGORY_COLOR).map(([category, color]) => (
-                <div key={category} className="flex items-center gap-2 text-xs text-neutral-600">
-                  <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                  Saint Paul category {category}
-                </div>
-              ))}
-              <div className="flex items-center gap-2 text-xs text-neutral-600">
-                <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: VACANT_UNCATEGORIZED_COLOR }} />
-                Minneapolis (uncategorized)
-              </div>
-            </div>
-          </div>
-        )}
-
-        {mode === "tif" && (
-          <div className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg text-sm text-neutral-700">
-            <label className="flex items-center gap-2 px-3 py-2.5 sm:py-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={housingOnly}
-                onChange={() => setBooleanFilter(setHousingOnly, housingOnlyRef, !housingOnly)}
-                className="cursor-pointer"
-              />
-              Housing districts only
-            </label>
-            <div className="border-t border-neutral-100 px-3 py-2 space-y-1">
-              <div className="flex items-center gap-2 text-xs text-neutral-600">
-                <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_HOUSING_COLOR }} />
-                Housing district
-              </div>
-              <div className="flex items-center gap-2 text-xs text-neutral-600">
-                <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: TIF_OTHER_COLOR }} />
-                Other or unstated type
-              </div>
-            </div>
-          </div>
-        )}
-
-        {mode === "relief" && (
-          <div className="rounded-lg bg-white/90 backdrop-blur-sm border border-neutral-200 shadow-lg text-sm text-neutral-700">
-            <label className="flex items-center gap-2 px-3 py-2.5 sm:py-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={freeOnly}
-                onChange={() => setBooleanFilter(setFreeOnly, freeOnlyRef, !freeOnly)}
-                className="cursor-pointer"
-              />
-              Free to enter only
-            </label>
-          </div>
-        )}
       </div>
 
       {selected && (
